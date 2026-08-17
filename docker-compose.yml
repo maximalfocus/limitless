@@ -1,0 +1,201 @@
+# The whole demonstration, on one hermetic container network with no egress.
+#
+# Three properties of this file are part of the mechanism rather than deployment detail:
+#
+#   * `app-a` and `app-b` are two separate processes sharing one database. An allowance held inside
+#     one process is not one allowance once a second process serves the same endpoint — it is two.
+#     Everything here reserves against the same rows, which is why the totals come out right.
+#   * `coastwise` is a *separate service* that keeps its own ledger. The cost of the work is read
+#     off the provider's bill rather than asserted by the application under study.
+#   * the `demo` network is `internal: true`, so nothing here can reach anything outside it, and no
+#     service publishes a port. The database and the provider in particular are unreachable from
+#     the host.
+#
+# Every service declares an explicit memory and CPU limit, so the demonstration's whole resource
+# envelope is bounded and legible on the host. The database's data directory lives on tmpfs, so no
+# run inherits another run's state and nothing persists.
+
+name: limitless
+
+x-hardening: &hardening
+  cap_drop: ["ALL"]
+  security_opt: ["no-new-privileges:true"]
+  read_only: true
+  restart: "no"
+
+x-store-env: &store-env
+  LIMITLESS_DATABASE_URL: postgresql://limitless:limitless-demo-password@db:5432/limitless
+  LIMITLESS_PROVIDER_URL: "http://coastwise:8000"
+
+x-runner-env: &runner-env
+  LIMITLESS_DATABASE_URL: postgresql://limitless:limitless-demo-password@db:5432/limitless
+  LIMITLESS_PROVIDER_URL: "http://coastwise:8000"
+  LIMITLESS_REPLICA_URLS: "http://app-a:8000,http://app-b:8000"
+  # A documented run parameter: how many of the running replicas a runner addresses (1 or 2).
+  LIMITLESS_REPLICAS: "${LIMITLESS_REPLICAS:-2}"
+
+x-app-limits: &app-limits
+  deploy:
+    resources:
+      limits:
+        cpus: "1.0"
+        memory: 512M
+
+x-runner-limits: &runner-limits
+  deploy:
+    resources:
+      limits:
+        cpus: "1.0"
+        memory: 512M
+
+x-app: &app
+  build:
+    context: .
+    target: app
+  image: limitless-app:local
+  user: "10001:10001"
+  networks: [demo]
+  tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"]
+  healthcheck:
+    test: ["CMD", "python", "-m", "limitless.healthcheck"]
+    interval: 3s
+    timeout: 5s
+    retries: 30
+    start_period: 3s
+  depends_on:
+    db:
+      condition: service_healthy
+    coastwise:
+      condition: service_healthy
+    seed:
+      condition: service_completed_successfully
+
+x-runner: &runner
+  build:
+    context: .
+    target: app
+  image: limitless-app:local
+  user: "10001:10001"
+  networks: [demo]
+  tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"]
+  depends_on:
+    app-a:
+      condition: service_healthy
+    app-b:
+      condition: service_healthy
+
+services:
+  db:
+    <<: *hardening
+    image: postgres:17-alpine
+    user: "70:70"
+    networks: [demo]
+    # No `ports:` — deliberately. The store is reachable only from inside this network.
+    environment:
+      POSTGRES_USER: limitless
+      POSTGRES_PASSWORD: limitless-demo-password
+      POSTGRES_DB: limitless
+      PGDATA: /var/lib/postgresql/data/pgdata
+    tmpfs:
+      - /var/lib/postgresql/data:uid=70,gid=70,mode=0750
+      - /run/postgresql:uid=70,gid=70,mode=0750
+      - /tmp:uid=70,gid=70
+    # Not performance tuning: two replicas each hold a connection pool, and later parts of this
+    # demonstration drive them concurrently. This is the capacity the topology needs to exist.
+    command: ["postgres", "-c", "max_connections=200"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U limitless -d limitless -h 127.0.0.1"]
+      interval: 2s
+      timeout: 3s
+      retries: 40
+      start_period: 2s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+  # The fictional metered provider. Keeps its own ledger, charges its own fictional price, and
+  # answers only inside this network. There is no real provider and no real money.
+  coastwise:
+    <<: [*hardening, *runner-limits]
+    build:
+      context: .
+      target: app
+    image: limitless-app:local
+    user: "10001:10001"
+    networks: [demo]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"]
+    command:
+      ["uvicorn", "limitless.provider.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    healthcheck:
+      test: ["CMD", "python", "-m", "limitless.healthcheck"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 3s
+
+  # One-shot: create the schema, rebuild the fictional fixtures, and empty the provider's bill.
+  seed:
+    <<: [*hardening, *runner-limits]
+    build:
+      context: .
+      target: app
+    image: limitless-app:local
+    user: "10001:10001"
+    networks: [demo]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"]
+    environment:
+      <<: *store-env
+    command: ["python", "-m", "limitless.seed"]
+    depends_on:
+      db:
+        condition: service_healthy
+      coastwise:
+        condition: service_healthy
+
+  app-a:
+    <<: [*hardening, *app, *app-limits]
+    environment:
+      <<: *store-env
+      LIMITLESS_REPLICA_NAME: app-a
+
+  app-b:
+    <<: [*hardening, *app, *app-limits]
+    environment:
+      <<: *store-env
+      LIMITLESS_REPLICA_NAME: app-b
+
+  # The sequential demonstration. Speaks only HTTP once the fixtures are seeded.
+  demo:
+    <<: [*hardening, *runner, *runner-limits]
+    environment:
+      <<: *runner-env
+    command: ["python", "-m", "limitless.demo"]
+
+  # Ruff, mypy, and the test suite, through the same boundary as everything else.
+  verify:
+    <<: [*hardening, *runner]
+    build:
+      context: .
+      target: verify
+    image: limitless-verify:local
+    # Ruff and mypy keep their caches under /tmp, so this one needs more room than the others.
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=512m"]
+    environment:
+      <<: *runner-env
+    command:
+      - "sh"
+      - "-c"
+      - "ruff check . && ruff format --check . && mypy && pytest -p no:cacheprovider"
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+
+networks:
+  demo:
+    name: limitless-demo
+    driver: bridge
+    internal: true
