@@ -1,0 +1,27 @@
+name: verify
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Docker Compose verification boundary
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # The same script a contributor runs locally. Nothing is installed on the runner beyond the
+      # Docker that is already there.
+      - name: Verify
+        run: bash scripts/verify.sh
