@@ -24,6 +24,7 @@ anyway, because something else was allowed to hold every connection there was.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -53,11 +54,20 @@ from ..models import (
     EnrichResponse,
     ImportResponse,
     JobStatus,
+    LookupResponse,
     RecordPage,
 )
 from ..providerclient import ProviderClient
 from ..refusal import LimitReachedError, RefusalKind
 from .acknowledgement import require_acknowledgement
+from .halffixes import (
+    CLIENT_ID_HEADER,
+    HALF_FIX_HEADER,
+    NON_CANCELLING_DEADLINE_SECONDS,
+    HalfFix,
+    HalfFixState,
+    parse_half_fix,
+)
 from .shapes import (
     COMPRESSED_BODY_LIMIT_BYTES,
     decompress_completely,
@@ -105,6 +115,10 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         provider = ProviderClient(settings.provider_url, timeout=None)
         app.state.pool = pool
         app.state.provider = provider
+        app.state.half_fixes = HalfFixState()
+        # Work the caller was told about and then abandoned. Held only so the event loop does not
+        # collect the task: nothing here is waiting for it, which is exactly the defect.
+        app.state.abandoned = set()
         try:
             yield
         finally:
@@ -130,6 +144,39 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         provider: ProviderClient = request.app.state.provider
         return provider
 
+    def half_fixes_of(request: Request) -> HalfFixState:
+        state: HalfFixState = request.app.state.half_fixes
+        return state
+
+    def selected_half_fix(request: Request) -> HalfFix:
+        half_fix = parse_half_fix(request.headers.get(HALF_FIX_HEADER))
+        if half_fix is None:
+            raise bad_request()
+        return half_fix
+
+    async def lookups_without_cancelling(
+        request: Request, *, tenant_id: str, company_names: list[str]
+    ) -> LookupResponse:
+        """Half-fix 4: answer the caller at the deadline, and let the work carry on regardless.
+
+        The task below is deliberately **not** cancelled. The caller gets a prompt, bounded response
+        and believes the request is over; the provider is still working, still occupying its slot,
+        and will still bill for it. Bounding a response is not bounding work — a deadline is only a
+        deadline if it cancels.
+        """
+        task = asyncio.create_task(
+            provider_of(request).lookups(tenant_id=tenant_id, company_names=company_names)
+        )
+        abandoned: set[asyncio.Task[LookupResponse]] = request.app.state.abandoned
+        abandoned.add(task)
+        task.add_done_callback(abandoned.discard)
+        done, _ = await asyncio.wait({task}, timeout=NON_CANCELLING_DEADLINE_SECONDS)
+        if task not in done:
+            raise HTTPException(
+                status.HTTP_504_GATEWAY_TIMEOUT, detail="request could not be completed"
+            )
+        return task.result()
+
     def pool_drained(operation: RefusedOperation) -> LimitReachedError:
         """The only refusal this variant has: the company's money ran out.
 
@@ -154,6 +201,31 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             raise bad_request() from None
         lookups = len(payload.records)
 
+        half_fix = selected_half_fix(request)
+        state = half_fixes_of(request)
+        key = state.key_for(
+            half_fix, tenant_id=tenant_id, client_id=request.headers.get(CLIENT_ID_HEADER)
+        )
+
+        if half_fix is HalfFix.REQUEST_RATE_LIMIT and not state.rate_limiter.allow(key):
+            raise LimitReachedError(RefusalKind.ALLOWANCE_EXHAUSTED, operation)
+        if half_fix in (HalfFix.IN_PROCESS_ALLOWANCE, HalfFix.CALLER_KEYED_ALLOWANCE):
+            allowance = (
+                state.in_process if half_fix is HalfFix.IN_PROCESS_ALLOWANCE else state.caller_keyed
+            )
+            if not allowance.charge(key, lookups * price):
+                raise LimitReachedError(RefusalKind.ALLOWANCE_EXHAUSTED, operation)
+
+        # Answered at the deadline whatever happens. If it did come back in time this is its
+        # result, and the provider is not asked a second time.
+        early: LookupResponse | None = None
+        if half_fix is HalfFix.NON_CANCELLING_DEADLINE:
+            early = await lookups_without_cancelling(
+                request,
+                tenant_id=tenant_id,
+                company_names=[r.company_name for r in payload.records],
+            )
+
         pool: ConnPool = pool_of(request)
         # Shape 4: the connection is held for the whole upstream call. Every request that is waiting
         # on the provider is also sitting on a connection that nothing else can have.
@@ -164,7 +236,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             await store.record_admitted_work(
                 conn, tenant_id=tenant_id, records=lookups, cents=lookups * price
             )
-            result = await provider_of(request).lookups(
+            result = early or await provider_of(request).lookups(
                 tenant_id=tenant_id, company_names=[r.company_name for r in payload.records]
             )
             entries = [

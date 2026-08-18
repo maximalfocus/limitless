@@ -87,6 +87,35 @@ The compressed import fixture is **generated at image build time** by a checked-
 repetitive fictional NDJSON at a documented single-layer ratio of about 294:1. No archive is ever
 committed to this repository.
 
+## The repairs that fail
+
+Four repairs a competent engineer reaches for. Each is genuinely implemented, each is genuinely
+honoured, and each fails anyway — which is why they are worth building.
+
+| Repair | Honoured | Fails because |
+|---|---|---|
+| a request-count rate limit | 60/min, **0 violations** against the caller | it counts requests; the resource is lookups. 62 440 lookups drained the whole cap from inside the limit |
+| an in-process allowance | exactly **40 000** at one replica | it is one allowance *per process*: **80 000** at two replicas, with nothing else changed |
+| a caller-keyed allowance | exactly **40 000** on a steady key | the key is a bucket the caller can mint a fresh one of, by changing a header |
+| a deadline that returns | the caller is answered at 1s | it bounds the *response*. The upstream call kept running, kept its slot, and billed anyway |
+
+...plus the size check that is present, honoured, and useless: it refused 281 KB and waved through
+169 KB worth **11.5x** the entire cap, because it measures the compressed number *after* the body is
+already in memory.
+
+## What this flaw is not
+
+Three negative controls mark the boundary, so nobody leaves with the wrong repair in mind.
+
+- **Every request is authenticated and authorized.** No object-level, function-level or
+  property-level authorization control would refuse a single one of them.
+- **One of each request is perfectly correct.** A functional suite written against them is entirely
+  green. The defect lives only in the aggregate, which is what functional suites do not assert on —
+  and that is the reason it ships.
+- **More capacity is not a fix.** Doubling the budget doubled the time-to-drain from 32 requests to
+  63 and changed the amplification ratio by **0.0015**. Capacity buys a constant factor; the fix has
+  to change the structure.
+
 ## Running it
 
 Requires **Docker** and nothing else — no PostgreSQL, no Python environment, no host tuning.
@@ -101,6 +130,8 @@ The vulnerable variant, if you want to drive it by hand:
 ```sh
 ALLOW_VULNERABLE_DEMO=true docker compose --profile vulnerable up --detach --wait vuln-a vuln-b
 docker compose run --rm harness python -m limitless.harness --variant vulnerable
+docker compose run --rm harness python -m limitless.harness --variant half-fixes
+docker compose run --rm harness python -m limitless.harness --variant controls
 ```
 
 A documented run parameter selects how many replicas are addressed:
