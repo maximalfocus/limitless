@@ -49,7 +49,11 @@ def _parser() -> argparse.ArgumentParser:
         "--mode",
         choices=[mode.value for mode in ReproductionMode],
         default=None,
-        help="reproduction mode (default: natural — no instrumentation in any code path)",
+        help=(
+            "reproduction mode (default: deterministic — the provider's hold/release control "
+            "makes occupancy arithmetic; natural uses no instrumentation at all and reports "
+            "observed figures, so it can be inconclusive)"
+        ),
     )
     parser.add_argument(
         "--concurrency",
@@ -159,9 +163,32 @@ async def _drive_unbounded(config: HarnessConfig, variant: str) -> int:
 
     missed = [outcome.shape for outcome in outcomes if not outcome.reproduced]
     if missed:
-        print(f"\n{len(missed)} did not reproduce: {missed}", file=sys.stderr)
-        return 1
-    return 0
+        print(unreproduced_notice(missed, config.mode), file=sys.stderr)
+    return unreproduced_exit_code(missed, config.mode)
+
+
+def unreproduced_exit_code(missed: list[str], mode: ReproductionMode) -> int:
+    """What an unbounded run that failed to reproduce something is worth.
+
+    `FR-012` and `FR-013` answer this differently on purpose. The deterministic mode carries the
+    required vulnerable-side assertions, so a shape it cannot reproduce is a failure. The natural
+    mode reports **observed** figures under genuine load, so a shape it did not observe is
+    **inconclusive** — not a pass, and not a failure either, because absence of observation proves
+    nothing. Reporting it as a failure would make a green run depend on winning a race, which is
+    exactly what `NFR-002` forbids.
+    """
+    if not missed:
+        return 0
+    return 1 if mode.instrumented else 0
+
+
+def unreproduced_notice(missed: list[str], mode: ReproductionMode) -> str:
+    if mode.instrumented:
+        return f"\n{len(missed)} did not reproduce: {missed}"
+    return (
+        f"\n{len(missed)} observed nothing this run: {missed}\n"
+        f"INCONCLUSIVE — not a pass. Re-run with --mode deterministic to assert on them."
+    )
 
 
 def _write_transcript(config: HarnessConfig, transcript: str) -> None:

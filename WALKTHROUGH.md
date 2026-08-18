@@ -232,8 +232,16 @@ occupies a configured number of slots, and the consequence is observed at a know
 > in a secure one.
 
 **Natural** has **no instrumentation whatsoever** in any code path and no provider hold. It is the
-evidence for the claim above: the same defects appear without it. A natural-mode run that observes no
-violation is reported as **inconclusive** — never as a pass.
+evidence for the claim above: the same defects appear without it. Where a shape needs the upstream
+occupied, this mode gets there by firing the same burst at a **slow** provider — which is an ordinary
+thing for a metered upstream to be — rather than by holding it. Nothing coordinates the run, so its
+figures are **observed** rather than arranged, and it can lose the race. A natural-mode run that
+observes no violation is reported as **inconclusive** — never as a pass, and never as a failure
+either, because absence of observation under genuine load proves nothing.
+
+```sh
+docker compose run --rm harness python -m limitless.harness --variant vulnerable --mode natural
+```
 
 Every required assertion in this project is an assertion about **counted accounting** — bytes, items,
 lookups, fictional cents, occupied slots, refusals. **None of them depends on wall-clock latency,

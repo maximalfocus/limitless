@@ -132,16 +132,34 @@ class ReproductionMode(StrEnum):
     present in any secure path.
 
     It changes only *when* work is released — never whether the application bounded it. The natural
-    mode below is the evidence for that: the same defects appear without any instrumentation at all.
+    mode below is the evidence for that: run with no instrumentation at all, the same defects still
+    appear. Where a natural run observes nothing it reports **inconclusive** rather than claiming
+    the application bounded anything, because that is all an unobserved race is worth.
     """
 
     NATURAL = "natural"
     """No instrumentation whatsoever, in any code path, and no provider hold.
 
-    Genuine concurrent load, and figures that are **observed**. Against the secure application its
-    assertions are still exact — zero bound violations, zero cheap-endpoint failures, the global cap
-    never breached — because a secure-side violation is a real failure rather than a flake.
+    Genuine concurrent load, and figures that are **observed**. Where a shape needs the upstream to
+    be occupied, this mode gets there by driving a burst at a **slow** provider rather than by
+    holding it: the provider is slow, which is an ordinary thing for a metered upstream to be, and
+    nothing coordinates the run. Whether the burst wins the race is therefore not guaranteed, which
+    is why a natural run that observes nothing is reported as **inconclusive** and never as a pass.
+
+    Against the secure application its assertions are still exact — zero bound violations, zero
+    cheap-endpoint failures, the global cap never breached — because a secure-side violation is a
+    real failure rather than a flake.
     """
+
+    @property
+    def instrumented(self) -> bool:
+        """Whether the provider's hold/release control may be used in this mode.
+
+        The one place the two modes actually diverge. Every caller that reaches for the hold asks
+        this first, so "natural means no hold" is a property of the code rather than a promise the
+        documentation makes on its behalf.
+        """
+        return self is ReproductionMode.DETERMINISTIC
 
 
 def parse_reproduction_mode(raw: str | None) -> ReproductionMode | None:
