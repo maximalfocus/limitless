@@ -30,6 +30,12 @@ reseed() {
 # containers.
 cleanup
 
+# Create the artifacts directory before anything mounts it. Docker creates a missing bind-mount
+# source itself, as root, and then this script cannot make it writable for the unprivileged user the
+# containers run as.
+mkdir -p artifacts
+chmod 0777 artifacts 2>/dev/null || true
+
 step "building images"
 docker compose build
 
@@ -143,7 +149,6 @@ print(f'the built fixture is {len(bundle)} B and passes its containment checks')
 "
 
 step "concurrent load harness against the secure application, two replicas, max concurrency"
-install -d -m 0777 artifacts
 # The harness's own documented ceiling, read from the code through a container rather than
 # duplicated here — and without needing anything on the host but Docker.
 MAX_CONCURRENCY="$(docker compose run --rm --no-deps -T verify \
