@@ -184,6 +184,20 @@ docker compose run --rm --no-deps -T \
   -e LIMITLESS_TRANSCRIPT_PATH=/artifacts/vulnerable-ladder.txt harness \
   python -m limitless.harness --variant vulnerable
 
+step "the repairs that fail — each is honoured, and each fails anyway"
+# Freshly started replicas: one of these repairs is about a counter that lives in the process, and
+# there is deliberately no endpoint to reset it.
+ALLOW_VULNERABLE_DEMO=true docker compose --profile vulnerable restart vuln-a vuln-b
+ALLOW_VULNERABLE_DEMO=true docker compose --profile vulnerable up --detach --wait vuln-a vuln-b
+docker compose run --rm --no-deps -T \
+  -e LIMITLESS_TRANSCRIPT_PATH=/artifacts/half-fixes.txt harness \
+  python -m limitless.harness --variant half-fixes
+
+step "the negative controls — what this flaw is not"
+docker compose run --rm --no-deps -T \
+  -e LIMITLESS_TRANSCRIPT_PATH=/artifacts/negative-controls.txt harness \
+  python -m limitless.harness --variant controls
+
 step "restoring the secure baseline before the suite runs"
 reseed
 

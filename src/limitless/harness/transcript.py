@@ -157,7 +157,9 @@ def _refusals(counts: dict[str, int]) -> str:
     return ", ".join(f"{kind}={count}" for kind, count in sorted(counts.items()))
 
 
-def render_shapes(outcomes: tuple[ShapeOutcome, ...], config: HarnessConfig) -> str:
+def render_shapes(
+    outcomes: tuple[ShapeOutcome, ...], config: HarnessConfig, *, title: str = "unbounded ladder"
+) -> str:
     """The unbounded ladder, as a transcript.
 
     The expectations here are the mirror image of the secure side's: each shape is supposed to
@@ -165,7 +167,7 @@ def render_shapes(outcomes: tuple[ShapeOutcome, ...], config: HarnessConfig) -> 
     """
     lines: list[str] = [
         "",
-        f"{fixtures.COMPANY_NAME} — INTENTIONALLY VULNERABLE variant, unbounded ladder",
+        f"{fixtures.COMPANY_NAME} — INTENTIONALLY VULNERABLE variant, {title}",
         "",
         f"  reproduction mode    : {config.mode.value}",
         f"  replicas addressed   : {len(config.runner.vulnerable_replica_urls)}",
@@ -179,7 +181,7 @@ def render_shapes(outcomes: tuple[ShapeOutcome, ...], config: HarnessConfig) -> 
     ]
 
     for outcome in outcomes:
-        lines.extend(_heading(f"SHAPE — {outcome.shape}"))
+        lines.extend(_heading(outcome.shape.upper()))
         lines.append(f"  {outcome.headline}")
         lines.append("")
         for entry in outcome.detail:
@@ -198,12 +200,12 @@ def render_shapes(outcomes: tuple[ShapeOutcome, ...], config: HarnessConfig) -> 
     missed = [o.shape for o in outcomes if not o.reproduced]
     lines.extend(_heading("RUN VERDICT"))
     if missed:
-        lines.append(f"  {len(missed)} shape(s) did not reproduce:")
+        lines.append(f"  {len(missed)} did not reproduce:")
         lines.extend(f"    - {shape}" for shape in missed)
         lines.append("")
         lines.append("  VERDICT: INCOMPLETE — a shape that does not reproduce proves nothing")
     else:
-        lines.append(f"  all {len(outcomes)} unbounded shapes reproduced.")
+        lines.append(f"  all {len(outcomes)} reproduced.")
         lines.append("")
         lines.append("  VERDICT: UNBOUNDED")
     lines.append("")

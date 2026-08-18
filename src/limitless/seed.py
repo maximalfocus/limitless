@@ -85,6 +85,19 @@ async def _wait_for_provider(
         await asyncio.sleep(delay)
 
 
+async def set_spend_cap(database_url: str, cents: int) -> None:
+    """Change the whole fictional company's monthly cap.
+
+    Setup, in the same category as seeding: one of the negative controls re-runs the same drain
+    against a larger budget, and the point it makes is that the ratio does not care.
+    """
+    async with connect(database_url) as conn:
+        await conn.execute(
+            "UPDATE spend_periods SET cap_cents = %s WHERE period_id = %s",
+            (cents, fixtures.SPEND_PERIOD_ID),
+        )
+
+
 async def seed(config: RunnerConfig, *, create: bool = True) -> None:
     async with connect(config.database_url) as conn:
         if create:

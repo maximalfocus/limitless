@@ -21,6 +21,7 @@ from ..config import (
     ReproductionMode,
     parse_reproduction_mode,
 )
+from .controls import HALF_FIXES, NEGATIVE_CONTROLS, in_process_allowance
 from .engine import run
 from .transcript import render, render_shapes
 from .vulnerable import SHAPES
@@ -37,9 +38,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--variant",
-        choices=["secure", "vulnerable"],
+        choices=["secure", "vulnerable", "half-fixes", "controls"],
         default="secure",
-        help="which application to drive (default: secure)",
+        help=(
+            "what to drive: the secure application, the unbounded ladder, the repairs that fail, "
+            "or the negative controls (default: secure)"
+        ),
     )
     parser.add_argument(
         "--mode",
@@ -85,8 +89,8 @@ def _configure(args: argparse.Namespace) -> HarnessConfig:
 async def _amain(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     config = _configure(args)
-    if args.variant == "vulnerable":
-        return await _drive_vulnerable(config)
+    if args.variant in ("vulnerable", "half-fixes", "controls"):
+        return await _drive_unbounded(config, args.variant)
     accounting = await run(config)
     transcript = render(accounting, config)
     print(transcript)
@@ -108,28 +112,54 @@ async def _amain(argv: list[str] | None = None) -> int:
     return 0
 
 
-async def _drive_vulnerable(config: HarnessConfig) -> int:
-    """Drive the unbounded ladder. Here a shape that fails to reproduce is the failure."""
+TITLES = {
+    "vulnerable": "unbounded ladder",
+    "half-fixes": "repairs that fail",
+    "controls": "negative controls",
+}
+
+
+async def _drive_unbounded(config: HarnessConfig, variant: str) -> int:
+    """Drive one of the unbounded suites.
+
+    Here the expectations are the mirror image of the secure side's: a shape, a repair, or a control
+    that fails to reproduce is the failure, because it has not been demonstrated.
+    """
     from ..httpclient import HalyardHTTP
 
-    if not config.runner.vulnerable_replica_urls:
+    urls = config.runner.vulnerable_replica_urls
+    if not urls:
         print("no vulnerable replicas are configured", file=sys.stderr)
         return 1
+
     async with HalyardHTTP(
-        config.runner.vulnerable_replica_urls[:1],
+        urls[:1],
         provider_url=config.runner.provider_url,
         timeout=config.runner.request_timeout_seconds,
     ) as client:
         await client.wait_until_ready()
-        outcomes = tuple([await shape(client, config) for shape in SHAPES])
+        if variant == "vulnerable":
+            outcomes = tuple([await shape(client, config) for shape in SHAPES])
+        elif variant == "controls":
+            outcomes = tuple([await control(client, config) for control in NEGATIVE_CONTROLS])
+        else:
+            outcomes = tuple([await half_fix(client, config) for half_fix in HALF_FIXES])
+            # The scope half-fix is the one that needs both counts, so it needs both clients.
+            async with HalyardHTTP(
+                urls,
+                provider_url=config.runner.provider_url,
+                timeout=config.runner.request_timeout_seconds,
+            ) as both:
+                await both.wait_until_ready()
+                outcomes = (*outcomes, await in_process_allowance(client, both, config))
 
-    transcript = render_shapes(outcomes, config)
+    transcript = render_shapes(outcomes, config, title=TITLES[variant])
     print(transcript)
     _write_transcript(config, transcript)
 
     missed = [outcome.shape for outcome in outcomes if not outcome.reproduced]
     if missed:
-        print(f"\n{len(missed)} unbounded shape(s) did not reproduce: {missed}", file=sys.stderr)
+        print(f"\n{len(missed)} did not reproduce: {missed}", file=sys.stderr)
         return 1
     return 0
 
