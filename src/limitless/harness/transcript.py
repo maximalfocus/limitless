@@ -177,8 +177,20 @@ def render_shapes(
         "",
         "  The deterministic mode's hold/release control lives in the provider fixture and in",
         "  unbounded code paths only. It changes only *when* work is released, never whether the",
-        "  application bounded it — the natural mode reproduces the same shapes without it.",
+        "  application bounded it.",
     ]
+    if config.mode.instrumented:
+        lines.append(
+            "  Run this with --mode natural for the same shapes with no instrumentation at all."
+        )
+    else:
+        lines.extend(
+            [
+                "  This run uses no instrumentation and no provider hold. Its figures are",
+                "  OBSERVED, not arranged: a shape that observes nothing here is INCONCLUSIVE,",
+                "  never a pass and never evidence that the application bounded anything.",
+            ]
+        )
 
     for outcome in outcomes:
         lines.extend(_heading(outcome.shape.upper()))
@@ -192,21 +204,33 @@ def render_shapes(
                 f"  AMPLIFICATION RATIO  : {outcome.cost_per_input_byte:.4f} "
                 f"{fixtures.CURRENCY_LABEL} per byte of input"
             )
-        lines.append(
-            f"  reproduced: {'YES' if outcome.reproduced else 'NO'}"
-            f"   VERDICT: {'UNBOUNDED' if outcome.reproduced else 'DID NOT REPRODUCE'}"
-        )
+        if outcome.reproduced:
+            lines.append("  reproduced: YES   VERDICT: UNBOUNDED")
+        elif config.mode.instrumented:
+            lines.append("  reproduced: NO    VERDICT: DID NOT REPRODUCE")
+        else:
+            lines.append("  reproduced: NO    VERDICT: INCONCLUSIVE — observed nothing this run")
 
     missed = [o.shape for o in outcomes if not o.reproduced]
     lines.extend(_heading("RUN VERDICT"))
-    if missed:
+    if missed and config.mode.instrumented:
         lines.append(f"  {len(missed)} did not reproduce:")
         lines.extend(f"    - {shape}" for shape in missed)
         lines.append("")
         lines.append("  VERDICT: INCOMPLETE — a shape that does not reproduce proves nothing")
+    elif missed:
+        lines.append(f"  {len(missed)} observed nothing this run:")
+        lines.extend(f"    - {shape}" for shape in missed)
+        lines.append("")
+        lines.append("  VERDICT: INCONCLUSIVE — a natural run that observes nothing proves")
+        lines.append("  nothing either way. It is not a pass, and it is not a failure. Re-run")
+        lines.append("  under --mode deterministic for the assertion that is allowed to fail.")
     else:
         lines.append(f"  all {len(outcomes)} reproduced.")
         lines.append("")
-        lines.append("  VERDICT: UNBOUNDED")
+        if config.mode.instrumented:
+            lines.append("  VERDICT: UNBOUNDED")
+        else:
+            lines.append("  VERDICT: UNBOUNDED (observed, with no instrumentation at all)")
     lines.append("")
     return "\n".join(lines) + "\n"

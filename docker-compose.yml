@@ -244,7 +244,7 @@ services:
     <<: [*hardening, *runner, *runner-limits]
     environment:
       <<: *runner-env
-      LIMITLESS_MODE: "${LIMITLESS_MODE:-natural}"
+      LIMITLESS_MODE: "${LIMITLESS_MODE:-deterministic}"
       LIMITLESS_CONCURRENCY: "${LIMITLESS_CONCURRENCY:-24}"
       LIMITLESS_ROUNDS: "${LIMITLESS_ROUNDS:-3}"
       LIMITLESS_TRANSCRIPT_PATH: /artifacts/harness-transcript.txt

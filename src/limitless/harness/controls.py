@@ -349,12 +349,20 @@ async def compressed_size_check(client: HalyardHTTP, config: HarnessConfig) -> S
 async def non_cancelling_deadline(client: HalyardHTTP, config: HarnessConfig) -> ShapeOutcome:
     """Half-fix 5: a deadline that answers the caller and lets the work carry on.
 
-    The provider is held, so the abandoned call cannot finish on its own. The caller is answered at
-    the deadline; the fixture's own occupancy count then says whether the work stopped. It did not.
+    **Deterministic.** The provider is held, so the abandoned call cannot finish on its own. The
+    caller is answered at the deadline; the fixture's own occupancy count then says whether the work
+    stopped. It did not.
+
+    **Natural.** No hold — the provider is merely slow, and whether the abandoned call is still in
+    flight when the count is read is **observed** rather than arranged.
     """
     await seed(config.runner)
     tenant = fixtures.ATTACKER_TENANT_ID
-    await client.set_provider_control(held=True)
+    instrumented = config.mode.instrumented
+    if instrumented:
+        await client.set_provider_control(held=True)
+    else:
+        await client.set_provider_control(slow_mode=True)
     detail: list[str] = []
     try:
         before = (await client.provider_stats()).in_flight
@@ -375,7 +383,7 @@ async def non_cancelling_deadline(client: HalyardHTTP, config: HarnessConfig) ->
         detail.append("  a deadline is only a deadline if it cancels")
         answered_and_unchanged = status == 504 and after >= 1
     finally:
-        await client.set_provider_control(held=False)
+        await client.set_provider_control(slow_mode=False, held=False)
         await asyncio.sleep(0)
 
     spent = await _spent(client)

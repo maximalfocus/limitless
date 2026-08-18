@@ -180,9 +180,21 @@ step "starting the vulnerable application (both opt-in actions, and only now)"
 ALLOW_VULNERABLE_DEMO=true docker compose --profile vulnerable up --detach --wait vuln-a vuln-b
 
 step "vulnerable ladder, deterministic mode — every shape is REQUIRED to reproduce"
+# The mode is passed explicitly. A step that names a mode it does not select is how this gate
+# silently ran the wrong one for five slices.
 docker compose run --rm --no-deps -T \
   -e LIMITLESS_TRANSCRIPT_PATH=/artifacts/vulnerable-ladder.txt harness \
-  python -m limitless.harness --variant vulnerable
+  python -m limitless.harness --variant vulnerable --mode deterministic
+
+step "vulnerable ladder, natural mode — no instrumentation at all, and INCONCLUSIVE is allowed"
+# The evidence that the flaw is in the application rather than in the hold. This run may observe
+# nothing and still exit 0: under genuine load, absence of observation proves nothing. It is
+# reported, never asserted on.
+ALLOW_VULNERABLE_DEMO=true docker compose --profile vulnerable restart vuln-a vuln-b
+ALLOW_VULNERABLE_DEMO=true docker compose --profile vulnerable up --detach --wait vuln-a vuln-b
+docker compose run --rm --no-deps -T \
+  -e LIMITLESS_TRANSCRIPT_PATH=/artifacts/vulnerable-ladder-natural.txt harness \
+  python -m limitless.harness --variant vulnerable --mode natural
 
 step "the repairs that fail — each is honoured, and each fails anyway"
 # Freshly started replicas: one of these repairs is about a counter that lives in the process, and
@@ -191,12 +203,12 @@ ALLOW_VULNERABLE_DEMO=true docker compose --profile vulnerable restart vuln-a vu
 ALLOW_VULNERABLE_DEMO=true docker compose --profile vulnerable up --detach --wait vuln-a vuln-b
 docker compose run --rm --no-deps -T \
   -e LIMITLESS_TRANSCRIPT_PATH=/artifacts/half-fixes.txt harness \
-  python -m limitless.harness --variant half-fixes
+  python -m limitless.harness --variant half-fixes --mode deterministic
 
 step "the negative controls — what this flaw is not"
 docker compose run --rm --no-deps -T \
   -e LIMITLESS_TRANSCRIPT_PATH=/artifacts/negative-controls.txt harness \
-  python -m limitless.harness --variant controls
+  python -m limitless.harness --variant controls --mode deterministic
 
 step "the comparison — every scenario side by side, in one table"
 # Freshly started replicas again: the comparison re-runs the scope repair, whose counter lives in

@@ -46,6 +46,7 @@ COPY src ./src
 COPY tests ./tests
 # The suite asserts on the published documents too, so they are part of this stage's boundary.
 COPY docker-compose.yml WALKTHROUGH.md LICENSE SECURITY.md CONTRIBUTING.md ./
+COPY scripts ./scripts
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-editable
 # The suite exercises the expansion fixture, so this stage builds it the same way the app stage does.
 RUN python -m limitless.generate_expansion_fixture --output /fixtures/expansion.ndjson.gz \

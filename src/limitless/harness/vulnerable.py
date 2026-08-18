@@ -248,11 +248,20 @@ async def expansion(client: HalyardHTTP, config: HarnessConfig) -> ShapeOutcome:
 async def unbounded_in_flight(client: HalyardHTTP, config: HarnessConfig) -> ShapeOutcome:
     """Shape 4. Nothing bounds work in flight, so an endpoint with no defect stops being served.
 
-    This is the scenario the deterministic mode exists for. The provider is **held**, exactly as
-    many calls as the replica has connections are put in flight, and the fixture's own occupancy
-    count is polled until it confirms they are all there. Only then is the cheap endpoint asked
-    whether it can still be served. Nothing waits on a duration; the question is asked at a known
-    instant.
+    This is the scenario the deterministic mode exists for, and the one place the two modes take
+    genuinely different routes to the same question.
+
+    **Deterministic.** The provider is **held**, exactly as many calls as the replica has
+    connections are put in flight, and the fixture's own occupancy count is polled until it confirms
+    they are all there. Only then is the cheap endpoint asked whether it can still be served.
+    Nothing waits on a duration; the question is asked at a known instant, and the answer is a
+    required assertion.
+
+    **Natural.** No hold, and no instrumentation of any kind. The provider is merely **slow**, which
+    is an ordinary thing for a metered upstream to be, and the same burst is fired at it. Whatever
+    occupancy the burst actually achieves is **observed** rather than arranged, so this route can
+    lose the race and observe nothing — and when it does, the outcome is inconclusive rather than a
+    pass or a failure. It exists to show that the flaw is in the application and not in the hold.
     """
     await _fresh(client, config)
     tenant = fixtures.ATTACKER_TENANT_ID
@@ -262,7 +271,12 @@ async def unbounded_in_flight(client: HalyardHTTP, config: HarnessConfig) -> Sha
     setup = await client.import_bundle(fixtures.ndjson_bundle(5), sequence=1, tenant_id=tenant)
     job_id = str(setup.body["job_id"]) if setup.body else ""
 
-    await client.set_provider_control(held=True)
+    instrumented = config.mode.instrumented
+    if instrumented:
+        await client.set_provider_control(held=True)
+    else:
+        # No hold. A slow upstream and a genuine burst, and whatever happens, happens.
+        await client.set_provider_control(slow_mode=True)
     tasks = [
         asyncio.create_task(
             client.enrich(
@@ -274,17 +288,26 @@ async def unbounded_in_flight(client: HalyardHTTP, config: HarnessConfig) -> Sha
         for slot in range(occupying)
     ]
     try:
-        # Arithmetic, not a race: wait until the fixture itself confirms the calls are in flight.
+        # Deterministic: arithmetic, not a race — wait until the fixture itself confirms the calls
+        # are in flight. Natural: look once the burst has been issued and report what is there.
+        peak = 0
         for _ in range(600):
             stats = await client.provider_stats()
+            peak = max(peak, stats.in_flight)
             if stats.in_flight >= occupying:
+                break
+            if not instrumented and all(task.done() for task in tasks):
                 break
             await asyncio.sleep(0.05)
         stats = await client.provider_stats()
+        observed = max(peak, stats.in_flight)
         detail.append(
-            f"{stats.in_flight} upstream calls held in flight, against a replica with "
-            f"{occupying} database connections — each request keeps one for the whole call"
+            f"{observed} upstream calls {'held' if instrumented else 'observed'} in flight, "
+            f"against a replica with {occupying} database connections — each request keeps one "
+            f"for the whole call"
         )
+        if not instrumented:
+            detail.append("  observed under genuine load, with no hold and no instrumentation")
 
         cheap = await client.job(job_id, sequence=900, tenant_id=tenant)
         detail.append(
@@ -293,9 +316,9 @@ async def unbounded_in_flight(client: HalyardHTTP, config: HarnessConfig) -> Sha
         )
         detail.append("  that endpoint contains no defect of its own")
         cheap_failed = not cheap.succeeded
-        occupied = stats.in_flight
+        occupied = observed
     finally:
-        await client.set_provider_control(held=False)
+        await client.set_provider_control(slow_mode=False, held=False)
         released: list[RequestRecord] = [r for r in await asyncio.gather(*tasks) if r is not None]
 
     detail.append(
