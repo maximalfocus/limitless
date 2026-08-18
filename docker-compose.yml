@@ -252,6 +252,16 @@ services:
       - ./artifacts:/artifacts
     command: ["python", "-m", "limitless.harness"]
 
+  # The comparison: every scenario side by side, in one table.
+  compare:
+    <<: [*hardening, *runner, *runner-limits]
+    environment:
+      <<: *runner-env
+    volumes:
+      - ./artifacts:/artifacts
+    command:
+      ["python", "-m", "limitless.compare", "--output", "/artifacts/comparison.txt"]
+
   # Ruff, mypy, and the test suite, through the same boundary as everything else.
   verify:
     <<: [*hardening, *runner]

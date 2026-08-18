@@ -22,7 +22,7 @@ from uuid import uuid4
 
 from .. import fixtures
 from ..config import HarnessConfig
-from ..httpclient import HalyardHTTP
+from ..httpclient import HalyardHTTP, RequestRecord
 from ..seed import seed, set_spend_cap
 from ..vulnerable.halffixes import (
     CLIENT_ID_HEADER,
@@ -30,6 +30,7 @@ from ..vulnerable.halffixes import (
     REQUESTS_PER_WINDOW,
     HalfFix,
 )
+from ..vulnerable.shapes import COMPRESSED_BODY_LIMIT_BYTES
 from .vulnerable import ShapeOutcome
 
 DRAIN_BATCH: Final = 2_000
@@ -52,9 +53,9 @@ async def _enrich(
     half_fix: HalfFix,
     client_id: str | None = None,
     offset: int = 0,
-) -> tuple[int, int]:
-    """One request. Returns its status and the bytes it cost the caller to send."""
-    record = await client.send(
+) -> RequestRecord:
+    """One request, with whichever repair is in effect."""
+    return await client.send(
         "POST",
         "/v1/enrich",
         operation="enrich",
@@ -67,7 +68,6 @@ async def _enrich(
         },
         headers=_headers(half_fix, client_id),
     )
-    return record.status_code, record.input_bytes
 
 
 async def _spent(client: HalyardHTTP) -> int:
@@ -88,11 +88,12 @@ async def request_rate_limit(client: HalyardHTTP, config: HarnessConfig) -> Shap
     prover = fixtures.BYSTANDER_TENANT_IDS[0]
     attacker = fixtures.ATTACKER_TENANT_ID
     input_bytes = 0
+    seen: list[RequestRecord] = []
 
     # First: is the limiter real? One request past the limit, on a tenant that does nothing else.
     limiter_refusals = 0
     for sequence in range(1, REQUESTS_PER_WINDOW + 2):
-        status, sent = await _enrich(
+        record = await _enrich(
             client,
             tenant_id=prover,
             records=1,
@@ -100,14 +101,15 @@ async def request_rate_limit(client: HalyardHTTP, config: HarnessConfig) -> Shap
             half_fix=HalfFix.REQUEST_RATE_LIMIT,
             offset=sequence,
         )
-        input_bytes += sent
-        if status != 201:
+        input_bytes += record.input_bytes
+        seen.append(record)
+        if record.status_code != 201:
             limiter_refusals += 1
 
     # Then: the caller stays inside it, on a tenant whose bucket is untouched, and drains anyway.
     allowed = admitted = 0
     for sequence in range(1, REQUESTS_PER_WINDOW + 1):
-        status, sent = await _enrich(
+        record = await _enrich(
             client,
             tenant_id=attacker,
             records=DRAIN_BATCH,
@@ -115,8 +117,9 @@ async def request_rate_limit(client: HalyardHTTP, config: HarnessConfig) -> Shap
             half_fix=HalfFix.REQUEST_RATE_LIMIT,
             offset=sequence * DRAIN_BATCH,
         )
-        input_bytes += sent
-        if status != 201:
+        input_bytes += record.input_bytes
+        seen.append(record)
+        if record.status_code != 201:
             break
         allowed += 1
         admitted += DRAIN_BATCH
@@ -125,7 +128,7 @@ async def request_rate_limit(client: HalyardHTTP, config: HarnessConfig) -> Shap
     remaining = fixtures.GLOBAL_SPEND_CAP_CENTS - await _spent(client)
     leftover = remaining // fixtures.LOOKUP_PRICE_CENTS
     if leftover > 0 and allowed < REQUESTS_PER_WINDOW:
-        _, sent = await _enrich(
+        record = await _enrich(
             client,
             tenant_id=attacker,
             records=leftover,
@@ -133,7 +136,8 @@ async def request_rate_limit(client: HalyardHTTP, config: HarnessConfig) -> Shap
             half_fix=HalfFix.REQUEST_RATE_LIMIT,
             offset=800_000,
         )
-        input_bytes += sent
+        input_bytes += record.input_bytes
+        seen.append(record)
         allowed += 1
         admitted += leftover
 
@@ -155,6 +159,12 @@ async def request_rate_limit(client: HalyardHTTP, config: HarnessConfig) -> Shap
         "  the unit of the limit must be the unit of the resource",
     ]
     return ShapeOutcome(
+        bound_in_effect=f"a request-count rate limit, {REQUESTS_PER_WINDOW} a minute per tenant",
+        items_admitted=admitted,
+        lookups=spent // fixtures.LOOKUP_PRICE_CENTS,
+        refusals={"rate_limiter": limiter_refusals, "spend_pool": 1},
+        records=tuple(seen),
+        kind="half-fix",
         shape="half-fix: a request-count rate limit",
         headline=(
             f"honoured with 0 violations against the caller, and the budget drained anyway "
@@ -179,7 +189,7 @@ async def _spend_until_refused(
     """Spend in ordinary requests until the repair refuses one. Returns cents admitted and bytes."""
     admitted_cents = input_bytes = 0
     for sequence in range(1, limit + 1):
-        status, sent = await _enrich(
+        record = await _enrich(
             client,
             tenant_id=tenant_id,
             records=DRAIN_BATCH,
@@ -188,8 +198,8 @@ async def _spend_until_refused(
             client_id=f"rotated-{sequence}" if rotate else client_id,
             offset=sequence * DRAIN_BATCH,
         )
-        input_bytes += sent
-        if status != 201:
+        input_bytes += record.input_bytes
+        if record.status_code != 201:
             break
         admitted_cents += DRAIN_BATCH * fixtures.LOOKUP_PRICE_CENTS
     return admitted_cents, input_bytes
@@ -205,7 +215,8 @@ async def in_process_allowance(
 
     This scenario needs **freshly started replicas**, because the counter it is about lives in the
     process and there is deliberately no endpoint to reset it. That is inconvenient, and it is also
-    the entire point: state that only a restart can clear is state that is not shared.
+    the entire point: state that only a restart can clear is state that is not shared. Run against
+    replicas whose counters are already spent it measures zero, and says so rather than pretending.
     """
     await seed(config.runner)
     allowance = fixtures.TENANT_ALLOWANCE_CENTS
@@ -218,17 +229,22 @@ async def in_process_allowance(
         both_replicas, tenant_id=double_tenant, half_fix=HalfFix.IN_PROCESS_ALLOWANCE
     )
 
+    multiple = f"{double / single:.0f}" if single else "an unmeasurable number of times"
     detail = [
         f"addressed at one replica, {single_tenant} was held to {single:,} cents "
         f"against an allowance of {allowance:,} — exactly right",
         f"addressed at two replicas, {double_tenant} was admitted {double:,} cents "
         f"against the same allowance of {allowance:,}",
-        f"  the effective allowance was multiplied by {double / single:.0f} and the only variable "
+        f"  the effective allowance was multiplied by {multiple} and the only variable "
         f"that changed was the number of processes enforcing it",
         "  nothing was corrupted and nothing was lost — the budget was enforced twice, in parallel",
         "  a limiter's counter must be shared by every process that serves the endpoint",
     ]
     return ShapeOutcome(
+        bound_in_effect="an in-process per-tenant allowance",
+        items_admitted=(single + double) // fixtures.LOOKUP_PRICE_CENTS,
+        lookups=(single + double) // fixtures.LOOKUP_PRICE_CENTS,
+        kind="half-fix",
         shape="half-fix: the limiter's scope",
         headline=(
             f"exact at one replica ({single:,}) and doubled at two ({double:,}), with nothing "
@@ -270,6 +286,10 @@ async def caller_keyed_allowance(client: HalyardHTTP, config: HarnessConfig) -> 
         "  the key must be the server-derived authenticated principal",
     ]
     return ShapeOutcome(
+        bound_in_effect="the same allowance, keyed on a caller-supplied value",
+        items_admitted=(held + rotated) // fixtures.LOOKUP_PRICE_CENTS,
+        lookups=(held + rotated) // fixtures.LOOKUP_PRICE_CENTS,
+        kind="half-fix",
         shape="half-fix: the limiter's key",
         headline=(f"held to {held:,} cents with a steady key and {rotated:,} by rotating it"),
         reproduced=held == allowance and rotated > allowance,
@@ -282,8 +302,6 @@ async def caller_keyed_allowance(client: HalyardHTTP, config: HarnessConfig) -> 
 async def compressed_size_check(client: HalyardHTTP, config: HarnessConfig) -> ShapeOutcome:
     """Half-fix 4: "we do check the size" — present, honoured, and useless."""
     import pathlib
-
-    from ..vulnerable.shapes import COMPRESSED_BODY_LIMIT_BYTES
 
     await seed(config.runner)
     tenant = fixtures.ATTACKER_TENANT_ID
@@ -306,6 +324,12 @@ async def compressed_size_check(client: HalyardHTTP, config: HarnessConfig) -> S
         "prevent has already happened",
     ]
     return ShapeOutcome(
+        bound_in_effect=f"a {COMPRESSED_BODY_LIMIT_BYTES:,} B check on the compressed size",
+        items_admitted=admitted_cents // fixtures.LOOKUP_PRICE_CENTS,
+        lookups=(await _spent(client)) // fixtures.LOOKUP_PRICE_CENTS,
+        refusals={"input_too_large": 1},
+        records=(refused, admitted),
+        kind="half-fix",
         shape="half-fix: a size check on the compressed number",
         headline=(
             f"refused {len(oversized):,} B and waved through {len(fixture):,} B worth "
@@ -334,13 +358,14 @@ async def non_cancelling_deadline(client: HalyardHTTP, config: HarnessConfig) ->
     detail: list[str] = []
     try:
         before = (await client.provider_stats()).in_flight
-        status, sent = await _enrich(
+        record = await _enrich(
             client,
             tenant_id=tenant,
             records=50,
             sequence=1,
             half_fix=HalfFix.NON_CANCELLING_DEADLINE,
         )
+        status, sent = record.status_code, record.input_bytes
         after = (await client.provider_stats()).in_flight
         detail.append(f"the caller was answered {status} at the configured deadline")
         detail.append(
@@ -356,6 +381,12 @@ async def non_cancelling_deadline(client: HalyardHTTP, config: HarnessConfig) ->
     spent = await _spent(client)
     detail.append(f"once released, the abandoned call completed and billed {spent:,} cents anyway")
     return ShapeOutcome(
+        bound_in_effect="a deadline that answers the caller without cancelling the work",
+        items_admitted=spent // fixtures.LOOKUP_PRICE_CENTS,
+        lookups=spent // fixtures.LOOKUP_PRICE_CENTS,
+        refusals={"gateway_timeout": 1},
+        records=(record,),
+        kind="half-fix",
         shape="half-fix: a deadline that returns but does not cancel",
         headline="the caller was answered at the deadline while the work carried on and billed",
         reproduced=answered_and_unchanged,
@@ -416,6 +447,8 @@ async def every_request_is_authorized(client: HalyardHTTP, config: HarnessConfig
         "a single one of them"
     )
     return ShapeOutcome(
+        bound_in_effect="none — this control is about who, not how much",
+        kind="control",
         shape="control: every request is authenticated and authorized",
         headline=f"all {authenticated} requests passed authentication and authorization",
         reproduced=authenticated == len(probes),
@@ -473,6 +506,12 @@ async def one_of_each_is_correct(client: HalyardHTTP, config: HarnessConfig) -> 
     detail.append("  this is the reason the defect ships: it exists only in the aggregate")
 
     return ShapeOutcome(
+        bound_in_effect="none — one request of each shape, at an ordinary size",
+        items_admitted=20 + 50 + fixtures.LEGITIMATE_IMPORT_RECORDS,
+        cheap_issued=1,
+        cheap_answered=1 if job.status_code == 200 else 0,
+        records=(batch, page, imported, job),
+        kind="control",
         shape="control: one of each request is perfectly correct",
         headline=f"all {correct} ordinary requests were correct, complete and prompt",
         reproduced=correct == 4,
@@ -499,7 +538,7 @@ async def more_capacity_is_not_a_fix(client: HalyardHTTP, config: HarnessConfig)
         issued = 0
         input_bytes = 0
         for sequence in range(1, 200):
-            status, sent = await _enrich(
+            record = await _enrich(
                 client,
                 tenant_id=fixtures.ATTACKER_TENANT_ID,
                 records=batch,
@@ -508,8 +547,8 @@ async def more_capacity_is_not_a_fix(client: HalyardHTTP, config: HarnessConfig)
                 offset=sequence * batch,
             )
             issued += 1
-            input_bytes += sent
-            if status != 201:
+            input_bytes += record.input_bytes
+            if record.status_code != 201:
                 break
         spent = await _spent(client)
         ratio = spent / input_bytes if input_bytes else 0.0
@@ -529,6 +568,10 @@ async def more_capacity_is_not_a_fix(client: HalyardHTTP, config: HarnessConfig)
     detail.append("  added capacity buys a constant factor; the fix has to change the structure")
 
     return ShapeOutcome(
+        bound_in_effect="none — the same drain against a bigger budget and a slower caller",
+        items_admitted=total_cents // fixtures.LOOKUP_PRICE_CENTS,
+        lookups=total_cents // fixtures.LOOKUP_PRICE_CENTS,
+        kind="control",
         shape="control: more capacity is not a fix",
         headline=(
             f"time-to-drain changed with capacity and rate; the amplification ratio did not "

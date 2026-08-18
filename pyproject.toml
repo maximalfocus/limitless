@@ -17,6 +17,7 @@ dependencies = [
 limitless-seed = "limitless.seed:main"
 limitless-demo = "limitless.demo.__main__:main"
 limitless-harness = "limitless.harness.__main__:main"
+limitless-compare = "limitless.compare.__main__:main"
 
 [dependency-groups]
 dev = [

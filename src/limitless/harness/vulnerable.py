@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import pathlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Final
 
 from .. import fixtures
@@ -40,7 +40,11 @@ DRAIN_MAX_REQUESTS: Final = 60
 
 @dataclass(frozen=True, slots=True)
 class ShapeOutcome:
-    """What one unbounded shape did, and whether it did it."""
+    """What one unbounded shape did, and whether it did it.
+
+    The fields below the first block exist so a scenario can be put in the comparison table beside a
+    secure one and read across: same columns, same units, same question answered.
+    """
 
     shape: str
     headline: str
@@ -48,6 +52,23 @@ class ShapeOutcome:
     detail: list[str]
     input_bytes: int
     cents: int
+
+    bound_in_effect: str = "none — nothing here asks how much"
+    kind: str = "shape"
+    """``shape``, ``half-fix``, or ``control``.
+
+    A control that establishes its boundary has not demonstrated an unbounded path; it has drawn a
+    line around one. Calling both of those "unbounded" in the same column would be the table lying
+    about what it is showing.
+    """
+
+    items_admitted: int = 0
+    lookups: int = 0
+    cheap_issued: int = 0
+    cheap_answered: int = 0
+    refusals: dict[str, int] = field(default_factory=dict)
+    records: tuple[RequestRecord, ...] = ()
+    """The per-request records underlying the row, for the comparison's verbose mode."""
 
     @property
     def cost_per_input_byte(self) -> float:
@@ -90,6 +111,10 @@ async def client_names_the_work(client: HalyardHTTP, config: HarnessConfig) -> S
 
     reproduced = batch.succeeded and share >= 0.5 and rows > 10_000
     return ShapeOutcome(
+        bound_in_effect="none — the caller says how much work to do",
+        items_admitted=NAMED_WORK_RECORDS + rows,
+        lookups=ledger.total_lookups,
+        records=(batch, page),
         shape="the client names the work",
         headline=(
             f"{NAMED_WORK_RECORDS:,} records named by one request billed {share:.2f}x the whole "
@@ -162,6 +187,10 @@ async def undivided_budget(client: HalyardHTTP, config: HarnessConfig) -> ShapeO
             refused.append(bystander)
 
     return ShapeOutcome(
+        bound_in_effect="one undivided pool, with no per-tenant partition",
+        items_admitted=ledger.total_lookups,
+        lookups=ledger.total_lookups,
+        refusals={"allowance_exhausted": len(refused)},
         shape="unbounded repetition against an un-partitioned budget",
         headline=(
             f"one tenant drained the shared pool and {len(refused)} of "
@@ -199,6 +228,10 @@ async def expansion(client: HalyardHTTP, config: HarnessConfig) -> ShapeOutcome:
         f"refused (observed, not asserted)",
     ]
     return ShapeOutcome(
+        bound_in_effect="a size check on the compressed number, after buffering",
+        items_admitted=admitted_records,
+        lookups=ledger.total_lookups,
+        records=(imported,),
         shape="expansion, checked in the wrong place on the wrong number",
         headline=(
             f"{len(bundle):,} B of gzip admitted work worth {over:.1f}x the entire monthly cap"
@@ -269,6 +302,10 @@ async def unbounded_in_flight(client: HalyardHTTP, config: HarnessConfig) -> Sha
         f"once released, {sum(1 for r in released if r.succeeded)} of the held calls completed"
     )
     return ShapeOutcome(
+        bound_in_effect="no in-flight cap and no deadline",
+        cheap_issued=1,
+        cheap_answered=0 if cheap_failed else 1,
+        records=(cheap,),
         shape="unbounded in-flight work and no deadline",
         headline=(
             f"{occupied} held calls occupied every connection and the cheap endpoint stopped "
