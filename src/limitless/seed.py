@@ -49,6 +49,10 @@ async def reset_fixtures(conn: Conn) -> None:
             ],
         )
         await conn.cursor().executemany(
+            "INSERT INTO admitted_work (tenant_id) VALUES (%s)",
+            [(tenant_id,) for tenant_id in fixtures.BILLABLE_TENANT_IDS],
+        )
+        await conn.cursor().executemany(
             "INSERT INTO records (record_id, tenant_id, company_name) VALUES (%s, %s, %s)",
             [
                 (record.record_id, record.tenant_id, record.company_name)

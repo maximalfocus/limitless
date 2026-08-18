@@ -164,17 +164,18 @@ def create_app(config: ProviderConfig | None = None) -> FastAPI:
             if state.slow_mode:
                 await asyncio.sleep(state.config.slow_mode_delay_seconds)
             cents = state.ledger.charge(payload.tenant_id, len(payload.items))
-            return LookupResponse(
-                lookups=len(payload.items),
-                cents_charged=cents,
-                results=[
+            results = (
+                [
                     LookupResult(
                         company_name=item.company_name,
                         registry_number=_registry_number_for(item.company_name),
                     )
                     for item in payload.items
-                ],
+                ]
+                if payload.return_results
+                else []
             )
+            return LookupResponse(lookups=len(payload.items), cents_charged=cents, results=results)
 
     @app.get("/ledger", response_model=LedgerView)
     async def ledger(request: Request) -> LedgerView:

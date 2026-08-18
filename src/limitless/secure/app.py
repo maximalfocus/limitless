@@ -73,6 +73,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             settings.database_url,
             min_size=settings.pool_min_size,
             max_size=settings.pool_max_size,
+            timeout=settings.pool_timeout_seconds,
         )
         await pool.open(wait=True, timeout=60)
         provider = ProviderClient(
@@ -102,7 +103,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.state.config = settings
     stamp_requests(app, settings.replica_name)
     install_refusal_handler(app, settings)
-    add_common_routes(app, settings, variant=VARIANT)
+    add_common_routes(app, settings, variant=VARIANT, usage_source=store.read_usage)
 
     def limiter_of(request: Request) -> InFlightLimiter:
         limiter: InFlightLimiter = request.app.state.limiter

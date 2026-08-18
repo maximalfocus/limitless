@@ -99,10 +99,18 @@ def record_id(tenant_id: str, index: int) -> str:
 
 
 def company_name(index: int) -> str:
-    """A conspicuously fictional company name, derived deterministically from the index."""
+    """A conspicuously fictional company name, derived deterministically from the index.
+
+    The prefix and suffix lists give a hundred and twenty combinations, which is nowhere near
+    enough: a caller naming fifty thousand records must produce fifty thousand *distinct* companies,
+    or the stored records collapse into a handful of rows and the demonstration quietly stops
+    demonstrating anything. Past the first hundred and twenty the name carries a series number, so
+    every index is its own fictional company for as long as anyone keeps counting.
+    """
     prefix = _PREFIXES[(index - 1) % len(_PREFIXES)]
     suffix = _SUFFIXES[((index - 1) // len(_PREFIXES)) % len(_SUFFIXES)]
-    return f"{prefix} {suffix}"
+    series = (index - 1) // (len(_PREFIXES) * len(_SUFFIXES))
+    return f"{prefix} {suffix}" if series == 0 else f"{prefix} {suffix} {series + 1}"
 
 
 def registry_number(index: int) -> str:
@@ -181,6 +189,21 @@ LEGITIMATE_IMPORT_RECORDS: Final = 300
 
 About 2 KB compressed and 20 KB decompressed, at a ratio near ten.
 """
+
+EXPANSION_FIXTURE_RECORDS: Final = 720_000
+"""The build-time expansion fixture: what an unremarkable upload can actually name.
+
+At the documented single-layer ratio this is about **171 KB** of gzip becoming about **50 MB** of
+NDJSON — inside any reasonable "we do check the size" bound, and worth about **2 880 000 fictional
+cents**, roughly **11.5x** the whole company's 250 000-cent monthly cap.
+
+The size is chosen so that its worst case stays comfortably inside the application container's own
+declared memory limit. It is repetitive NDJSON compressed once. It is not nested, not recursive, and
+not self-referential, and nothing in this repository explains how to build something that is.
+"""
+
+EXPANSION_FIXTURE_PATH: Final = "/fixtures/expansion.ndjson.gz"
+"""Where the generator writes it at image build time. Never committed to the repository."""
 
 OVER_EXPANDING_IMPORT_RECORDS: Final = 150_000
 """An import whose *compressed* size is unremarkable and whose expansion is not.

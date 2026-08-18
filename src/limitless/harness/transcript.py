@@ -18,6 +18,7 @@ from .. import fixtures
 from ..config import HarnessConfig
 from ..httpclient import replica_label
 from .accounting import RunAccounting, ScenarioAccounting
+from .vulnerable import ShapeOutcome
 
 WIDTH: Final = 98
 OBSERVED: Final = "(observed, not asserted)"
@@ -154,3 +155,56 @@ def _refusals(counts: dict[str, int]) -> str:
     if not counts:
         return "none"
     return ", ".join(f"{kind}={count}" for kind, count in sorted(counts.items()))
+
+
+def render_shapes(outcomes: tuple[ShapeOutcome, ...], config: HarnessConfig) -> str:
+    """The unbounded ladder, as a transcript.
+
+    The expectations here are the mirror image of the secure side's: each shape is supposed to
+    reproduce, and a shape that does not is the failure. The verdict says so explicitly.
+    """
+    lines: list[str] = [
+        "",
+        f"{fixtures.COMPANY_NAME} — INTENTIONALLY VULNERABLE variant, unbounded ladder",
+        "",
+        f"  reproduction mode    : {config.mode.value}",
+        f"  replicas addressed   : {len(config.runner.vulnerable_replica_urls)}",
+        f"  provider             : {fixtures.PROVIDER_NAME}, "
+        f"{fixtures.LOOKUP_PRICE_CENTS} {fixtures.CURRENCY_LABEL} per lookup",
+        f"  fictional cap        : {fixtures.GLOBAL_SPEND_CAP_CENTS} for the whole company",
+        "",
+        "  The deterministic mode's hold/release control lives in the provider fixture and in",
+        "  unbounded code paths only. It changes only *when* work is released, never whether the",
+        "  application bounded it — the natural mode reproduces the same shapes without it.",
+    ]
+
+    for outcome in outcomes:
+        lines.extend(_heading(f"SHAPE — {outcome.shape}"))
+        lines.append(f"  {outcome.headline}")
+        lines.append("")
+        for entry in outcome.detail:
+            lines.append(f"  {entry}")
+        lines.append("")
+        if outcome.input_bytes:
+            lines.append(
+                f"  AMPLIFICATION RATIO  : {outcome.cost_per_input_byte:.4f} "
+                f"{fixtures.CURRENCY_LABEL} per byte of input"
+            )
+        lines.append(
+            f"  reproduced: {'YES' if outcome.reproduced else 'NO'}"
+            f"   VERDICT: {'UNBOUNDED' if outcome.reproduced else 'DID NOT REPRODUCE'}"
+        )
+
+    missed = [o.shape for o in outcomes if not o.reproduced]
+    lines.extend(_heading("RUN VERDICT"))
+    if missed:
+        lines.append(f"  {len(missed)} shape(s) did not reproduce:")
+        lines.extend(f"    - {shape}" for shape in missed)
+        lines.append("")
+        lines.append("  VERDICT: INCOMPLETE — a shape that does not reproduce proves nothing")
+    else:
+        lines.append(f"  all {len(outcomes)} unbounded shapes reproduced.")
+        lines.append("")
+        lines.append("  VERDICT: UNBOUNDED")
+    lines.append("")
+    return "\n".join(lines) + "\n"

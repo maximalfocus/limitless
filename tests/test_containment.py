@@ -18,6 +18,7 @@ from limitless.config import (
     RunnerConfig,
     require_allowed_target,
 )
+from limitless.vulnerable.acknowledgement import acknowledged, require_acknowledgement
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -70,11 +71,46 @@ def test_the_topology_is_two_replicas_over_one_database() -> None:
     assert sum(1 for name in names if name == "db") == 1
 
 
-def test_no_vulnerable_service_exists_yet() -> None:
-    """The harness exists now. A deliberately unbounded application still does not."""
-    assert not {"vuln-a", "vuln-b"} & set(services())
-    modules = {path.parent.name for path in (ROOT / "src").rglob("*.py")}
-    assert "vulnerable" not in modules
+def test_the_vulnerable_application_is_behind_an_opt_in_profile() -> None:
+    """It exists now, and the default Compose path must not be able to reach it."""
+    for name in ("vuln-a", "vuln-b"):
+        service = services()[name]
+        assert service["profiles"] == ["vulnerable"], f"{name} is not behind an opt-in profile"
+
+
+def test_the_vulnerable_application_also_requires_an_acknowledgement() -> None:
+    """A profile is something you enable once and forget. The second action is not."""
+    for name in ("vuln-a", "vuln-b"):
+        environment = services()[name]["environment"]
+        assert "ALLOW_VULNERABLE_DEMO" in environment
+    assert not acknowledged({})
+    assert not acknowledged({"ALLOW_VULNERABLE_DEMO": ""})
+    assert not acknowledged({"ALLOW_VULNERABLE_DEMO": "1"})
+    assert not acknowledged({"ALLOW_VULNERABLE_DEMO": "yes"})
+    assert acknowledged({"ALLOW_VULNERABLE_DEMO": "true"})
+    assert acknowledged({"ALLOW_VULNERABLE_DEMO": "TRUE"})
+
+
+def test_the_acknowledgement_stops_the_import_rather_than_the_request() -> None:
+    """An application that starts and then refuses requests is still a running application."""
+    with pytest.raises(RuntimeError, match="ALLOW_VULNERABLE_DEMO"):
+        require_acknowledgement({})
+
+
+def test_the_vulnerable_service_is_hardened_like_everything_else() -> None:
+    for name in ("vuln-a", "vuln-b"):
+        service = services()[name]
+        assert service["cap_drop"] == ["ALL"]
+        assert "no-new-privileges:true" in service["security_opt"]
+        assert service["read_only"] is True
+        assert "ports" not in service
+        assert service["user"] == "10001:10001"
+
+
+def test_the_secure_application_never_imports_the_vulnerable_one() -> None:
+    """The two variants share a boundary module, and nothing else."""
+    for path in (ROOT / "src" / "limitless" / "secure").rglob("*.py"):
+        assert "vulnerable" not in path.read_text(), f"{path.name} reaches into the vulnerable side"
 
 
 def test_the_harness_writes_only_to_the_artifacts_directory() -> None:

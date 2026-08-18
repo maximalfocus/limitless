@@ -66,6 +66,19 @@ CREATE TABLE IF NOT EXISTS tenant_allowances (
         CHECK (committed_cents + reserved_cents <= allowance_cents)
 );
 
+-- What the application has committed itself to bill for, whether or not it has billed it yet.
+--
+-- Deliberately carries **no** ceiling of any kind. The tables above bound money because money is
+-- bounded; this one records an obligation, and an obligation the application accepted is a fact
+-- rather than something a constraint may refuse after the fact. It is written **as work is
+-- admitted** rather than once a request finishes, so the record of what was taken on survives a
+-- process that does not finish taking it on.
+CREATE TABLE IF NOT EXISTS admitted_work (
+    tenant_id        TEXT PRIMARY KEY REFERENCES tenants (tenant_id),
+    records_admitted BIGINT NOT NULL DEFAULT 0,
+    cents_admitted   BIGINT NOT NULL DEFAULT 0
+);
+
 -- The whole fictional company's budget for the period. Partitioned into the allowances above.
 CREATE TABLE IF NOT EXISTS spend_periods (
     period_id       TEXT   PRIMARY KEY,
@@ -80,7 +93,8 @@ CREATE TABLE IF NOT EXISTS spend_periods (
 """
 
 TRUNCATE_ALL: Final = """
-TRUNCATE TABLE jobs, records, tenant_allowances, spend_periods, tenants RESTART IDENTITY CASCADE;
+TRUNCATE TABLE jobs, records, admitted_work, tenant_allowances, spend_periods, tenants
+    RESTART IDENTITY CASCADE;
 """
 
 BACKSTOP_CONSTRAINTS: Final = (

@@ -10,15 +10,25 @@ set -euo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 cleanup() {
-  docker compose down --volumes --remove-orphans >/dev/null 2>&1 || true
+  docker compose --profile vulnerable down --volumes --remove-orphans >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
 step() { printf '\n==> %s\n' "$1"; }
 
+# Capture first, then match. Piping into `grep -q` under `set -o pipefail` is a trap: grep exits the
+# moment it finds a match, the producer takes SIGPIPE, and the pipeline reports failure *because the
+# check succeeded*. Every containment gate below would have been inverted by it.
+contains() { printf '%s\n' "$1" | grep -qE "$2"; }
+
 reseed() {
   docker compose run --rm --no-deps -T seed >/dev/null
 }
+
+# Start from nothing. A boundary that inherits whatever happened to be running already is not
+# verifying this checkout, and the containment checks below would be reporting on somebody else's
+# containers.
+cleanup
 
 step "building images"
 docker compose build
@@ -47,11 +57,12 @@ docker compose run --rm --no-deps -T -e LIMITLESS_REPLICAS=1 demo >/dev/null
 echo "one-replica run completed successfully"
 
 step "containment: nothing is published, and the network has no egress"
-if docker compose config | grep -qE '^\s+ports:'; then
+rendered_config="$(docker compose --profile vulnerable config)"
+if contains "$rendered_config" '^[[:space:]]+ports:'; then
   echo "a service publishes a port; nothing in this demonstration may be reachable from outside" >&2
   exit 1
 fi
-if ! docker compose config | grep -q 'internal: true'; then
+if ! contains "$rendered_config" 'internal: true'; then
   echo "the demo network is not internal; this demonstration must have no egress" >&2
   exit 1
 fi
@@ -87,16 +98,49 @@ if missing:
 print("every service declares an explicit memory and CPU limit")
 PY
 
-step "containment: no vulnerable entry point exists yet"
-if docker compose config --services | grep -qE '^(vuln-a|vuln-b)$'; then
-  echo "a vulnerable service is defined; this slice must not introduce one" >&2
+step "containment: the vulnerable application is not started by the default path"
+running_services="$(docker compose ps --services)"
+if contains "$running_services" '^(vuln-a|vuln-b)$'; then
+  echo "the vulnerable application was started by the default Compose path" >&2
   exit 1
 fi
-if find src -name '*.py' | grep -q '/vulnerable/'; then
-  echo "vulnerable source exists; this slice must not introduce it" >&2
+default_services="$(docker compose config --services)"
+if contains "$default_services" '^(vuln-a|vuln-b)$'; then
+  echo "the vulnerable application is not behind an opt-in profile" >&2
   exit 1
 fi
-echo "the secure application is the only application, and it is the default"
+profile_services="$(docker compose --profile vulnerable config --services)"
+if ! contains "$profile_services" '^vuln-a$'; then
+  echo "the vulnerable application is missing from its opt-in profile" >&2
+  exit 1
+fi
+echo "not selected without its opt-in profile"
+
+step "containment: the opt-in profile alone is not an acknowledgement"
+if docker compose --profile vulnerable run --rm --no-deps -T -e ALLOW_VULNERABLE_DEMO= vuln-a \
+     python -c "import limitless.vulnerable.app" >/dev/null 2>&1; then
+  echo "the vulnerable application started without ALLOW_VULNERABLE_DEMO=true" >&2
+  exit 1
+fi
+echo "refused to start without ALLOW_VULNERABLE_DEMO=true"
+
+step "containment: no archive artifact is committed; the fixture is generated at build time"
+tracked_files="$(git ls-files)"
+if contains "$tracked_files" '\.(gz|zip|bz2|xz|tar|7z)$'; then
+  echo "a compressed artifact is committed to the repository" >&2
+  exit 1
+fi
+docker compose run --rm --no-deps -T harness \
+  python -c "
+import pathlib
+from limitless import fixtures
+from limitless.generate_expansion_fixture import check
+bundle = pathlib.Path(fixtures.EXPANSION_FIXTURE_PATH).read_bytes()
+failures = check(bundle)
+if failures:
+    raise SystemExit('\n'.join(failures))
+print(f'the built fixture is {len(bundle)} B and passes its containment checks')
+"
 
 step "concurrent load harness against the secure application, two replicas, max concurrency"
 install -d -m 0777 artifacts
@@ -110,12 +154,14 @@ if [ -z "$MAX_CONCURRENCY" ]; then
 fi
 echo "the harness ceiling is ${MAX_CONCURRENCY} simultaneous requests"
 docker compose run --rm --no-deps -T \
-  -e LIMITLESS_CONCURRENCY="$MAX_CONCURRENCY" harness
+  -e LIMITLESS_CONCURRENCY="$MAX_CONCURRENCY" harness \
+  python -m limitless.harness --mode natural
 
 step "concurrent load harness against the secure application, one replica, max concurrency"
 docker compose run --rm --no-deps -T \
   -e LIMITLESS_REPLICAS=1 -e LIMITLESS_CONCURRENCY="$MAX_CONCURRENCY" \
-  -e LIMITLESS_TRANSCRIPT_PATH=/artifacts/harness-transcript-one-replica.txt harness
+  -e LIMITLESS_TRANSCRIPT_PATH=/artifacts/harness-transcript-one-replica.txt harness \
+  python -m limitless.harness --mode natural
 
 step "the harness accepts no arbitrary target"
 if docker compose run --rm --no-deps -T \
@@ -125,8 +171,20 @@ if docker compose run --rm --no-deps -T \
 fi
 echo "refused a target outside this demonstration's own services"
 
+step "starting the vulnerable application (both opt-in actions, and only now)"
+ALLOW_VULNERABLE_DEMO=true docker compose --profile vulnerable up --detach --wait vuln-a vuln-b
+
+step "vulnerable ladder, deterministic mode — every shape is REQUIRED to reproduce"
+docker compose run --rm --no-deps -T \
+  -e LIMITLESS_TRANSCRIPT_PATH=/artifacts/vulnerable-ladder.txt harness \
+  python -m limitless.harness --variant vulnerable
+
+step "restoring the secure baseline before the suite runs"
+reseed
+
 step "ruff, mypy, and the test suite, through the same boundary"
 reseed
-docker compose run --rm --no-deps verify
+ALLOW_VULNERABLE_DEMO=true docker compose run --rm --no-deps \
+  -e LIMITLESS_REQUIRE_VULNERABLE=1 verify
 
 printf '\n==> verification complete\n'

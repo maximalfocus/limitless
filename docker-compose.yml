@@ -31,6 +31,7 @@ x-runner-env: &runner-env
   LIMITLESS_DATABASE_URL: postgresql://limitless:limitless-demo-password@db:5432/limitless
   LIMITLESS_PROVIDER_URL: "http://coastwise:8000"
   LIMITLESS_REPLICA_URLS: "http://app-a:8000,http://app-b:8000"
+  LIMITLESS_VULNERABLE_REPLICA_URLS: "http://vuln-a:8000,http://vuln-b:8000"
   # A documented run parameter: how many of the running replicas a runner addresses (1 or 2).
   LIMITLESS_REPLICAS: "${LIMITLESS_REPLICAS:-2}"
 
@@ -69,6 +70,47 @@ x-app: &app
       condition: service_healthy
     seed:
       condition: service_completed_successfully
+
+x-vulnerable-env: &vulnerable-env
+  LIMITLESS_DATABASE_URL: postgresql://limitless:limitless-demo-password@db:5432/limitless
+  LIMITLESS_PROVIDER_URL: "http://coastwise:8000"
+  # A small pool, so that holding connections across upstream calls has somewhere to show. The
+  # unbounded variant keeps a connection for the whole duration of a provider call; with the
+  # provider held, the pool is occupied at a known moment and the cheap endpoint finds out.
+  LIMITLESS_POOL_MAX_SIZE: "8"
+  LIMITLESS_POOL_TIMEOUT_SECONDS: "3"
+  # Required. The opt-in profile alone is not an acknowledgement; the application refuses to start.
+  ALLOW_VULNERABLE_DEMO: "${ALLOW_VULNERABLE_DEMO:-}"
+
+x-vulnerable-app: &vulnerable-app
+  profiles: ["vulnerable"]
+  build:
+    context: .
+    target: app
+  image: limitless-app:local
+  user: "10001:10001"
+  networks: [demo]
+  tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"]
+  command:
+    ["uvicorn", "limitless.vulnerable.app:app", "--host", "0.0.0.0", "--port", "8000"]
+  healthcheck:
+    test: ["CMD", "python", "-m", "limitless.healthcheck"]
+    interval: 3s
+    timeout: 5s
+    retries: 30
+    start_period: 3s
+  depends_on:
+    db:
+      condition: service_healthy
+    coastwise:
+      condition: service_healthy
+    seed:
+      condition: service_completed_successfully
+  deploy:
+    resources:
+      limits:
+        cpus: "1.0"
+        memory: 1G
 
 x-runner: &runner
   build:
@@ -172,6 +214,29 @@ services:
     environment:
       <<: *runner-env
     command: ["python", "-m", "limitless.demo"]
+
+  # ---------------------------------------------------------------------------------------------
+  # INTENTIONALLY VULNERABLE. Two deliberate actions are required and neither alone is enough:
+  # the `vulnerable` profile selects these services, and ALLOW_VULNERABLE_DEMO=true acknowledges
+  # what they are. The default Compose path never starts them.
+  #
+  #   ALLOW_VULNERABLE_DEMO=true docker compose --profile vulnerable up --detach --wait vuln-a vuln-b
+  #
+  # They get a larger memory limit than the secure replicas, because being unbounded is the entire
+  # point and the limit is what keeps that contained. They are hardened exactly as everything else
+  # is: non-root, no capabilities, no new privileges, read-only root filesystem, no published port.
+  # ---------------------------------------------------------------------------------------------
+  vuln-a:
+    <<: [*hardening, *vulnerable-app]
+    environment:
+      <<: *vulnerable-env
+      LIMITLESS_REPLICA_NAME: vuln-a
+
+  vuln-b:
+    <<: [*hardening, *vulnerable-app]
+    environment:
+      <<: *vulnerable-env
+      LIMITLESS_REPLICA_NAME: vuln-b
 
   # The concurrent load harness. Generates genuine concurrent load against our own services only,
   # bounded by explicit configuration, and writes its transcript to ./artifacts.

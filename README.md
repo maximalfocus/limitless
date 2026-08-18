@@ -62,13 +62,45 @@ answering every request, and **zero** bound violations. Those exact assertions a
 the harness genuinely generates load — a harness that generated none would satisfy them without
 trying.
 
+## The unbounded ladder
+
+An **opt-in, intentionally vulnerable** variant of the same API demonstrates the four shapes the
+bounds exist to prevent. It is not started by the default path, and starting it takes **two**
+deliberate actions — the `vulnerable` Compose profile *and* `ALLOW_VULNERABLE_DEMO=true`. Neither is
+enough alone, and without the second the application refuses to import at all.
+
+| Shape | What it does |
+|---|---|
+| the client names the work | one request naming 50 000 records bills **0.80x** the whole monthly cap; 18 bytes of query string serialize 50 400 records |
+| repetition against an un-partitioned budget | one tenant drains the shared pool to zero, and the tenants that spent nothing are refused |
+| expansion, checked wrongly | 169 KB of gzip admits work worth **11.5x** the entire monthly cap, recorded durably as it is admitted |
+| unbounded in-flight work, no deadline | held calls occupy every connection and an endpoint that needs no provider stops being served |
+
+The **deterministic** reproduction mode makes the last of those arithmetic rather than a race with
+the clock: the provider fixture is held, exactly as many calls as the replica has connections are put
+in flight, and only once the fixture's own count confirms it is the cheap endpoint asked whether it
+can still be served. That instrumentation lives in the provider fixture and in unbounded code paths
+only — never in a secure one — and it changes only *when* work is released, never whether the
+application bounded it.
+
+The compressed import fixture is **generated at image build time** by a checked-in generator, from
+repetitive fictional NDJSON at a documented single-layer ratio of about 294:1. No archive is ever
+committed to this repository.
+
 ## Running it
 
 Requires **Docker** and nothing else — no PostgreSQL, no Python environment, no host tuning.
 
 ```sh
 bash scripts/demo.sh      # the sequential demonstration
-bash scripts/verify.sh    # the complete boundary: demo, harness, audit gate, containment, tests
+bash scripts/verify.sh    # the complete boundary: demo, harness, ladder, containment, tests
+```
+
+The vulnerable variant, if you want to drive it by hand:
+
+```sh
+ALLOW_VULNERABLE_DEMO=true docker compose --profile vulnerable up --detach --wait vuln-a vuln-b
+docker compose run --rm harness python -m limitless.harness --variant vulnerable
 ```
 
 A documented run parameter selects how many replicas are addressed:

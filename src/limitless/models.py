@@ -108,6 +108,14 @@ class LookupItem(BaseModel):
 class LookupRequest(BaseModel):
     tenant_id: str
     items: list[LookupItem]
+    return_results: bool = True
+    """Whether the provider should echo the enriched records back.
+
+    A metered provider bills for the lookups it performs whether or not the caller wants the rows
+    returned, and bulk jobs routinely do not. Setting this to ``False`` changes what comes back over
+    the wire and nothing at all about what is charged — it is not instrumentation, and it does not
+    make any path more or less bounded.
+    """
 
 
 class LookupResult(BaseModel):

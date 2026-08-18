@@ -22,7 +22,8 @@ from ..config import (
     parse_reproduction_mode,
 )
 from .engine import run
-from .transcript import render
+from .transcript import render, render_shapes
+from .vulnerable import SHAPES
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -33,6 +34,12 @@ def _parser() -> argparse.ArgumentParser:
             "amplification accounting. Accepts no target: it can only address this "
             "demonstration's own in-network services."
         ),
+    )
+    parser.add_argument(
+        "--variant",
+        choices=["secure", "vulnerable"],
+        default="secure",
+        help="which application to drive (default: secure)",
     )
     parser.add_argument(
         "--mode",
@@ -78,6 +85,8 @@ def _configure(args: argparse.Namespace) -> HarnessConfig:
 async def _amain(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     config = _configure(args)
+    if args.variant == "vulnerable":
+        return await _drive_vulnerable(config)
     accounting = await run(config)
     transcript = render(accounting, config)
     print(transcript)
@@ -97,6 +106,38 @@ async def _amain(argv: list[str] | None = None) -> int:
         )
         return 1
     return 0
+
+
+async def _drive_vulnerable(config: HarnessConfig) -> int:
+    """Drive the unbounded ladder. Here a shape that fails to reproduce is the failure."""
+    from ..httpclient import HalyardHTTP
+
+    if not config.runner.vulnerable_replica_urls:
+        print("no vulnerable replicas are configured", file=sys.stderr)
+        return 1
+    async with HalyardHTTP(
+        config.runner.vulnerable_replica_urls[:1],
+        provider_url=config.runner.provider_url,
+        timeout=config.runner.request_timeout_seconds,
+    ) as client:
+        await client.wait_until_ready()
+        outcomes = tuple([await shape(client, config) for shape in SHAPES])
+
+    transcript = render_shapes(outcomes, config)
+    print(transcript)
+    _write_transcript(config, transcript)
+
+    missed = [outcome.shape for outcome in outcomes if not outcome.reproduced]
+    if missed:
+        print(f"\n{len(missed)} unbounded shape(s) did not reproduce: {missed}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _write_transcript(config: HarnessConfig, transcript: str) -> None:
+    config.transcript_path.parent.mkdir(parents=True, exist_ok=True)
+    config.transcript_path.write_text(transcript)
+    print(f"transcript written to {config.transcript_path}")
 
 
 def main(argv: list[str] | None = None) -> int:

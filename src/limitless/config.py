@@ -122,6 +122,19 @@ BOUNDS: Final = SecureBounds()
 class ReproductionMode(StrEnum):
     """How a run reproduces what it reports."""
 
+    DETERMINISTIC = "deterministic"
+    """The default. Occupancy and exhaustion are **arithmetic rather than a race with the clock**.
+
+    The provider fixture's hold/release control lets a configured number of calls occupy a
+    configured number of slots, so the consequence is observed at a known instant rather than
+    whenever the machine gets there. The instrumentation lives in the **provider fixture and in
+    unbounded code paths only**, is named as instrumentation wherever it appears, and is never
+    present in any secure path.
+
+    It changes only *when* work is released — never whether the application bounded it. The natural
+    mode below is the evidence for that: the same defects appear without any instrumentation at all.
+    """
+
     NATURAL = "natural"
     """No instrumentation whatsoever, in any code path, and no provider hold.
 
@@ -134,7 +147,7 @@ class ReproductionMode(StrEnum):
 def parse_reproduction_mode(raw: str | None) -> ReproductionMode | None:
     """Parse a mode name. Returns the default for ``None``/empty and ``None`` for a bad value."""
     if raw is None or raw == "":
-        return ReproductionMode.NATURAL
+        return ReproductionMode.DETERMINISTIC
     try:
         return ReproductionMode(raw.strip().lower())
     except ValueError:
@@ -180,6 +193,14 @@ class AppConfig:
     replica_name: str
     pool_min_size: int
     pool_max_size: int
+    pool_timeout_seconds: float
+    """How long a request waits for a database connection before giving up.
+
+    It exists so that a pool which has been entirely occupied reports that fact instead of hanging.
+    The secure application never reaches it, because it does not hold connections across upstream
+    calls; the unbounded one does, which is the point.
+    """
+
     lookup_price_cents: int
     """What the application expects a lookup to cost, so it can reserve before the work happens.
 
@@ -200,6 +221,7 @@ class AppConfig:
             replica_name=source.get("LIMITLESS_REPLICA_NAME", "app-a"),
             pool_min_size=int(source.get("LIMITLESS_POOL_MIN_SIZE", "2")),
             pool_max_size=int(source.get("LIMITLESS_POOL_MAX_SIZE", "16")),
+            pool_timeout_seconds=float(source.get("LIMITLESS_POOL_TIMEOUT_SECONDS", "5")),
             lookup_price_cents=int(
                 source.get("LIMITLESS_LOOKUP_PRICE_CENTS", str(_default_price()))
             ),
@@ -313,6 +335,14 @@ class HarnessConfig:
     concurrency: int
     rounds: int
     batch_records: int
+    vulnerable_pool_max_size: int
+    """How many database connections one unbounded replica has.
+
+    A documented run parameter, because the deterministic mode occupies exactly that many and then
+    asks an endpoint that needs one whether it can still be served. Knowing the number is what makes
+    the answer arithmetic instead of a guess.
+    """
+
     transcript_path: Path
 
     @property
@@ -345,6 +375,9 @@ class HarnessConfig:
                 "LIMITLESS_BATCH_RECORDS",
                 DEFAULT_BATCH_RECORDS,
                 BOUNDS.max_batch_items,
+            ),
+            vulnerable_pool_max_size=_bounded_int(
+                source, "LIMITLESS_VULNERABLE_POOL_MAX_SIZE", 8, 64
             ),
             transcript_path=Path(
                 source.get("LIMITLESS_TRANSCRIPT_PATH", "/artifacts/harness-transcript.txt")

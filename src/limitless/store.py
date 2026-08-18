@@ -98,6 +98,34 @@ ON CONFLICT (record_id) DO UPDATE
 """
 
 
+SQL_RECORD_ADMITTED_WORK: Final = """
+UPDATE admitted_work
+   SET records_admitted = records_admitted + %(records)s,
+       cents_admitted   = cents_admitted + %(cents)s
+ WHERE tenant_id = %(tenant_id)s
+"""
+
+SQL_ADMITTED_USAGE_VIEW: Final = """
+SELECT tenant_id, records_admitted, cents_admitted
+  FROM admitted_work
+ WHERE tenant_id = %(tenant_id)s
+"""
+
+SQL_CHARGE_UNDIVIDED_POOL: Final = """
+UPDATE spend_periods
+   SET committed_cents = committed_cents + %(cents)s
+ WHERE period_id = %(period_id)s
+   AND committed_cents + reserved_cents + %(cents)s <= cap_cents
+RETURNING committed_cents, cap_cents
+"""
+"""Spend from one undivided pool, with no per-tenant partition anywhere in the predicate.
+
+The whole company's cap is still here — which is why the pool eventually says no — but *whose* money
+it is has been forgotten. Every tenant draws from the same balance, so the first tenant to ask for
+enough of it decides what is left for everybody else.
+"""
+
+
 class AllowanceExhaustedError(Exception):
     """Raised inside the reservation transaction so it unwinds; never reaches the client as-is."""
 
@@ -163,6 +191,53 @@ async def settle(
 async def release(conn: Conn, reservation: Reservation) -> None:
     """Give back money held for work that was never performed."""
     await settle(conn, reservation, lookups_performed=0, cents_charged=0)
+
+
+async def record_admitted_work(conn: Conn, *, tenant_id: str, records: int, cents: int) -> None:
+    """Write down work the application has committed itself to, as it commits itself to it.
+
+    Deliberately its own statement rather than part of a larger transaction: what has been admitted
+    so far must be durable *now*, not once the request that admitted it gets around to finishing. A
+    process that runs out of memory halfway through a bundle still leaves behind an honest record of
+    what it had already taken on, which is the only reason anyone would ever find out.
+    """
+    if records < 0 or cents < 0:
+        raise ValueError(f"cannot admit {records} records worth {cents}")
+    await conn.execute(
+        SQL_RECORD_ADMITTED_WORK, {"tenant_id": tenant_id, "records": records, "cents": cents}
+    )
+
+
+async def charge_undivided_pool(conn: Conn, *, lookups: int, price_cents: int) -> bool:
+    """Spend from the one undivided pool. Returns ``False`` once there is nothing left in it.
+
+    Note what is missing next to :func:`reserve`: any notion of *whose* budget this is. There is no
+    per-tenant predicate — the signature does not even take a tenant — so one tenant's spending is
+    simply the company's, and the tenants who did none of it find out when they are refused.
+
+    Recording the obligation is a separate call: charging for work and committing to work are
+    different facts, and a bundle commits to far more than it ever charges for.
+    """
+    cents = lookups * price_cents
+    cursor = await conn.execute(
+        SQL_CHARGE_UNDIVIDED_POOL, {"period_id": fixtures.SPEND_PERIOD_ID, "cents": cents}
+    )
+    return cursor.rowcount == 1
+
+
+async def read_admitted_usage(conn: Conn, tenant_id: str) -> UsageView | None:
+    """A tenant's spend as the unbounded application records it."""
+    cursor = await conn.execute(SQL_ADMITTED_USAGE_VIEW, {"tenant_id": tenant_id})
+    row = await cursor.fetchone()
+    if row is None:
+        return None
+    return UsageView(
+        tenant_id=str(row["tenant_id"]),
+        period_id=fixtures.SPEND_PERIOD_ID,
+        lookups_performed=int(row["records_admitted"]),
+        cents_charged=int(row["cents_admitted"]),
+        currency=fixtures.CURRENCY_LABEL,
+    )
 
 
 async def read_usage(conn: Conn, tenant_id: str) -> UsageView | None:

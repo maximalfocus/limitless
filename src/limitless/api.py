@@ -15,6 +15,7 @@ cap is a ``503``. Missing, malformed, unknown, and expired credentials are the s
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Annotated, Any, Final
 from uuid import UUID, uuid4
 
@@ -23,9 +24,17 @@ from fastapi import FastAPI, Header, HTTPException, Request, Response, status
 from . import audit, store
 from .auth import authenticate
 from .config import AppConfig
-from .db import ConnPool
+from .db import Conn, ConnPool
 from .models import HealthResponse, JobView, UsageView
 from .refusal import LimitReachedError, RefusalKind
+
+UsageSource = Callable[[Conn, str], Awaitable[UsageView | None]]
+"""Where a variant reads a tenant's spend from.
+
+The two variants answer this endpoint with the same shape and, for the same legitimate work, the
+same numbers — but they keep the record in different places, because one has a bound to maintain
+and the other has only an obligation to remember.
+"""
 
 REQUEST_ID_HEADER: Final = "X-Request-Id"
 REPLICA_HEADER: Final = "X-Limitless-Replica"
@@ -111,7 +120,9 @@ def install_refusal_handler(app: FastAPI, settings: AppConfig) -> None:
         ) from exc
 
 
-def add_common_routes(app: FastAPI, settings: AppConfig, *, variant: str) -> None:
+def add_common_routes(
+    app: FastAPI, settings: AppConfig, *, variant: str, usage_source: UsageSource
+) -> None:
     """Health, the cheap job endpoint, and the tenant's own usage — identical across variants."""
 
     @app.get("/healthz", response_model=HealthResponse)
@@ -149,7 +160,7 @@ def add_common_routes(app: FastAPI, settings: AppConfig, *, variant: str) -> Non
         tenant_id = require_tenant(authorization)
         request.state.tenant_id = tenant_id
         async with pool_of(request).connection() as conn:
-            view = await store.read_usage(conn, tenant_id)
+            view = await usage_source(conn, tenant_id)
         if view is None:
             raise not_found()
         return view
