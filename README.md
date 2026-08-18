@@ -134,6 +134,23 @@ docker compose run --rm harness python -m limitless.harness --variant half-fixes
 docker compose run --rm harness python -m limitless.harness --variant controls
 ```
 
+Every scenario in one table, which is the fastest way to see the point:
+
+```sh
+docker compose run --rm compare              # the comparison
+docker compose run --rm compare --verbose    # ...and the per-request records behind it
+```
+
+```
+secure scenarios     : 2, every one bounded, worst amplification 0.0199 cents per input byte
+unbounded scenarios  : 12, worst amplification 17.0672 cents per input byte
+the ratio between them: 856x
+```
+
+[`WALKTHROUGH.md`](WALKTHROUGH.md) explains all of it: the five dimensions, amplification as a ratio,
+the taxonomy and its caveats, the four shapes with the repair that fails against each, the three
+negative controls, and all five secure controls with their trade-offs.
+
 A documented run parameter selects how many replicas are addressed:
 
 ```sh

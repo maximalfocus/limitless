@@ -198,6 +198,13 @@ docker compose run --rm --no-deps -T \
   -e LIMITLESS_TRANSCRIPT_PATH=/artifacts/negative-controls.txt harness \
   python -m limitless.harness --variant controls
 
+step "the comparison — every scenario side by side, in one table"
+# Freshly started replicas again: the comparison re-runs the scope repair, whose counter lives in
+# the process that the previous step has just spent.
+ALLOW_VULNERABLE_DEMO=true docker compose --profile vulnerable restart vuln-a vuln-b
+ALLOW_VULNERABLE_DEMO=true docker compose --profile vulnerable up --detach --wait vuln-a vuln-b
+docker compose run --rm --no-deps -T compare
+
 step "restoring the secure baseline before the suite runs"
 reseed
 
