@@ -87,16 +87,43 @@ if missing:
 print("every service declares an explicit memory and CPU limit")
 PY
 
-step "containment: no vulnerable entry point and no load harness exists yet"
-if docker compose config --services | grep -qE '^(vuln-a|vuln-b|harness)$'; then
-  echo "a vulnerable service or a load harness is defined; this slice must not introduce one" >&2
+step "containment: no vulnerable entry point exists yet"
+if docker compose config --services | grep -qE '^(vuln-a|vuln-b)$'; then
+  echo "a vulnerable service is defined; this slice must not introduce one" >&2
   exit 1
 fi
-if find src -name '*.py' | grep -qE '/(vulnerable|harness)/'; then
-  echo "vulnerable or harness source exists; this slice must not introduce it" >&2
+if find src -name '*.py' | grep -q '/vulnerable/'; then
+  echo "vulnerable source exists; this slice must not introduce it" >&2
   exit 1
 fi
 echo "the secure application is the only application, and it is the default"
+
+step "concurrent load harness against the secure application, two replicas, max concurrency"
+install -d -m 0777 artifacts
+# The harness's own documented ceiling, read from the code through a container rather than
+# duplicated here — and without needing anything on the host but Docker.
+MAX_CONCURRENCY="$(docker compose run --rm --no-deps -T verify \
+  python -c 'from limitless.config import MAX_CONCURRENCY; print(MAX_CONCURRENCY)' | tr -dc '0-9')"
+if [ -z "$MAX_CONCURRENCY" ]; then
+  echo "could not read the harness concurrency ceiling from the code" >&2
+  exit 1
+fi
+echo "the harness ceiling is ${MAX_CONCURRENCY} simultaneous requests"
+docker compose run --rm --no-deps -T \
+  -e LIMITLESS_CONCURRENCY="$MAX_CONCURRENCY" harness
+
+step "concurrent load harness against the secure application, one replica, max concurrency"
+docker compose run --rm --no-deps -T \
+  -e LIMITLESS_REPLICAS=1 -e LIMITLESS_CONCURRENCY="$MAX_CONCURRENCY" \
+  -e LIMITLESS_TRANSCRIPT_PATH=/artifacts/harness-transcript-one-replica.txt harness
+
+step "the harness accepts no arbitrary target"
+if docker compose run --rm --no-deps -T \
+     -e LIMITLESS_REPLICA_URLS=http://example.com:8000 harness >/dev/null 2>&1; then
+  echo "the harness accepted a target that is not one of this demonstration's own services" >&2
+  exit 1
+fi
+echo "refused a target outside this demonstration's own services"
 
 step "ruff, mypy, and the test suite, through the same boundary"
 reseed

@@ -173,6 +173,20 @@ services:
       <<: *runner-env
     command: ["python", "-m", "limitless.demo"]
 
+  # The concurrent load harness. Generates genuine concurrent load against our own services only,
+  # bounded by explicit configuration, and writes its transcript to ./artifacts.
+  harness:
+    <<: [*hardening, *runner, *runner-limits]
+    environment:
+      <<: *runner-env
+      LIMITLESS_MODE: "${LIMITLESS_MODE:-natural}"
+      LIMITLESS_CONCURRENCY: "${LIMITLESS_CONCURRENCY:-24}"
+      LIMITLESS_ROUNDS: "${LIMITLESS_ROUNDS:-3}"
+      LIMITLESS_TRANSCRIPT_PATH: /artifacts/harness-transcript.txt
+    volumes:
+      - ./artifacts:/artifacts
+    command: ["python", "-m", "limitless.harness"]
+
   # Ruff, mypy, and the test suite, through the same boundary as everything else.
   verify:
     <<: [*hardening, *runner]

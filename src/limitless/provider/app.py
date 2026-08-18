@@ -24,8 +24,8 @@ bounded its own work, which is the only thing the demonstration ever asserts on.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from typing import Annotated, Final
 
 from fastapi import Body, FastAPI, Request
@@ -40,6 +40,7 @@ from ..models import (
     LookupResponse,
     LookupResult,
     ProviderControlView,
+    ProviderStatsView,
 )
 from .ledger import Ledger
 
@@ -65,6 +66,33 @@ class ProviderState:
         # Set means "not held". Starting released is what makes the control opt-in.
         self._released = asyncio.Event()
         self._released.set()
+        self._in_flight = 0
+        self._peak_in_flight = 0
+
+    @property
+    def in_flight(self) -> int:
+        return self._in_flight
+
+    @property
+    def peak_in_flight(self) -> int:
+        return self._peak_in_flight
+
+    @contextmanager
+    def occupied(self) -> Iterator[None]:
+        """Count one lookup call as in flight for its duration, and remember the high-water mark."""
+        self._in_flight += 1
+        self._peak_in_flight = max(self._peak_in_flight, self._in_flight)
+        try:
+            yield
+        finally:
+            self._in_flight -= 1
+
+    def forget_occupancy(self) -> None:
+        """Start a run with no remembered high-water mark."""
+        self._peak_in_flight = self._in_flight
+
+    def stats_view(self) -> ProviderStatsView:
+        return ProviderStatsView(in_flight=self._in_flight, peak_in_flight=self._peak_in_flight)
 
     @property
     def held(self) -> bool:
@@ -123,22 +151,30 @@ def create_app(config: ProviderConfig | None = None) -> FastAPI:
         is precisely why the bound has to live in the application.
         """
         state = state_of(request)
-        # Instrumentation, in this order: a hold blocks until released, then slow mode delays.
-        await state.await_release()
-        if state.slow_mode:
-            await asyncio.sleep(state.config.slow_mode_delay_seconds)
-        cents = state.ledger.charge(payload.tenant_id, len(payload.items))
-        return LookupResponse(
-            lookups=len(payload.items),
-            cents_charged=cents,
-            results=[
-                LookupResult(
-                    company_name=item.company_name,
-                    registry_number=_registry_number_for(item.company_name),
-                )
-                for item in payload.items
-            ],
-        )
+        with state.occupied():
+            # A scheduling yield, not a delay. Without it this handler runs start to finish without
+            # ever handing control back, so concurrent calls could never overlap and the occupancy
+            # this fixture reports would always be one however much load arrived. It adds no time
+            # and changes nothing about whether the application under study bounded its own work —
+            # it only lets the event loop interleave calls the way any real provider's I/O would,
+            # so that the peak below is a number worth reading.
+            await asyncio.sleep(0)
+            # Instrumentation, in this order: a hold blocks until released, then slow mode delays.
+            await state.await_release()
+            if state.slow_mode:
+                await asyncio.sleep(state.config.slow_mode_delay_seconds)
+            cents = state.ledger.charge(payload.tenant_id, len(payload.items))
+            return LookupResponse(
+                lookups=len(payload.items),
+                cents_charged=cents,
+                results=[
+                    LookupResult(
+                        company_name=item.company_name,
+                        registry_number=_registry_number_for(item.company_name),
+                    )
+                    for item in payload.items
+                ],
+            )
 
     @app.get("/ledger", response_model=LedgerView)
     async def ledger(request: Request) -> LedgerView:
@@ -149,7 +185,16 @@ def create_app(config: ProviderConfig | None = None) -> FastAPI:
         """Start a run from an empty bill. Setup, not observation."""
         state = state_of(request)
         state.ledger.reset()
+        state.forget_occupancy()
         return state.ledger.view()
+
+    @app.get("/stats", response_model=ProviderStatsView)
+    async def stats(request: Request) -> ProviderStatsView:
+        """How busy this fixture has been.
+
+        The peak is the figure the application's in-flight bound is checked against.
+        """
+        return state_of(request).stats_view()
 
     @app.post("/control", response_model=ProviderControlView)
     async def control(
