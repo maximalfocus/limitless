@@ -24,7 +24,9 @@ from .models import LookupResponse
 class ProviderClient:
     """Speaks to the in-network provider fixture, and to nothing else."""
 
-    def __init__(self, base_url: str, *, timeout: float = 30.0, max_connections: int = 64) -> None:
+    def __init__(
+        self, base_url: str, *, timeout: float | None = 30.0, max_connections: int = 64
+    ) -> None:
         # The destination is validated here as well as in configuration, so no code path can reach
         # a host that is not one of this demonstration's own services.
         self._base_url = require_allowed_target(base_url)
@@ -50,13 +52,20 @@ class ProviderClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    async def lookups(self, *, tenant_id: str, company_names: list[str]) -> LookupResponse:
-        """Perform the named lookups at the provider and return what it charged for them."""
+    async def lookups(
+        self, *, tenant_id: str, company_names: list[str], return_results: bool = True
+    ) -> LookupResponse:
+        """Perform the named lookups at the provider and return what it charged for them.
+
+        ``return_results=False`` asks the provider not to echo the enriched rows back, which is what
+        a bulk job wants. It bills exactly the same either way.
+        """
         response = await self._client.post(
             f"{self._base_url}/v1/lookups",
             json={
                 "tenant_id": tenant_id,
                 "items": [{"company_name": name} for name in company_names],
+                "return_results": return_results,
             },
         )
         response.raise_for_status()

@@ -98,15 +98,23 @@ def test_the_harness_cannot_be_pointed_at_another_host() -> None:
 
 def test_an_unknown_reproduction_mode_is_refused() -> None:
     with pytest.raises(ValueError):
-        HarnessConfig.from_env({**BASE_ENV, "LIMITLESS_MODE": "deterministic"})
-    assert parse_reproduction_mode(None) is ReproductionMode.NATURAL
+        HarnessConfig.from_env({**BASE_ENV, "LIMITLESS_MODE": "nonsense"})
     assert parse_reproduction_mode("natural") is ReproductionMode.NATURAL
+    assert parse_reproduction_mode("deterministic") is ReproductionMode.DETERMINISTIC
     assert parse_reproduction_mode("nonsense") is None
 
 
-def test_this_slice_ships_the_natural_mode_only() -> None:
-    """The deterministic mode and the provider hold it uses belong to later work."""
-    assert [mode.value for mode in ReproductionMode] == ["natural"]
+def test_the_deterministic_mode_is_the_default() -> None:
+    """Every required vulnerable-side assertion is carried by the deterministic mode."""
+    assert parse_reproduction_mode(None) is ReproductionMode.DETERMINISTIC
+    assert HarnessConfig.from_env(BASE_ENV).mode is ReproductionMode.DETERMINISTIC
+    assert set(ReproductionMode) == {ReproductionMode.DETERMINISTIC, ReproductionMode.NATURAL}
+
+
+def test_the_natural_mode_is_the_evidence_that_the_instrumentation_changes_nothing() -> None:
+    """It exists so the same defects can be shown with no instrumentation in any code path."""
+    config = HarnessConfig.from_env({**BASE_ENV, "LIMITLESS_MODE": "natural"})
+    assert config.mode is ReproductionMode.NATURAL
 
 
 def test_in_flight_capacity_follows_the_replicas_addressed() -> None:

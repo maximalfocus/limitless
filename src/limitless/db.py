@@ -20,12 +20,15 @@ Conn = psycopg.AsyncConnection[Row]
 ConnPool = AsyncConnectionPool[Conn]
 
 
-def make_pool(database_url: str, *, min_size: int = 2, max_size: int = 16) -> ConnPool:
+def make_pool(
+    database_url: str, *, min_size: int = 2, max_size: int = 16, timeout: float = 30.0
+) -> ConnPool:
     """Build a closed pool; the caller opens it inside its own lifespan."""
     pool = AsyncConnectionPool(
         conninfo=database_url,
         min_size=min_size,
         max_size=max_size,
+        timeout=timeout,
         open=False,
         kwargs={"row_factory": dict_row, "autocommit": True},
     )
