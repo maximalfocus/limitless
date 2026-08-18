@@ -15,7 +15,7 @@ import pytest
 from starlette.requests import Request
 
 from limitless.audit import RefusedOperation
-from limitless.config import BOUNDS, SecureBounds
+from limitless.config import BOUNDS, MAX_CONCURRENCY, SecureBounds
 from limitless.refusal import LimitReachedError, RefusalKind
 from limitless.secure.bounds import (
     bounded_page_size,
@@ -158,7 +158,7 @@ def test_the_documented_bounds_are_the_ones_in_force() -> None:
     assert BOUNDS.max_import_body_bytes == 262_144
     assert BOUNDS.max_decompressed_bytes == 4_194_304
     assert BOUNDS.max_expansion_ratio == 25
-    assert BOUNDS.max_in_flight_upstream == 8
+    assert BOUNDS.max_in_flight_upstream == 48
 
 
 def test_a_non_object_body_is_a_bad_request_not_a_refusal() -> None:
@@ -166,3 +166,13 @@ def test_a_non_object_body_is_a_bad_request_not_a_refusal() -> None:
         parse_json_object(b"[1, 2, 3]")
     with pytest.raises(ValueError):
         parse_json_object(b"not json at all")
+
+
+def test_the_in_flight_cap_can_absorb_the_highest_load_the_harness_can_generate() -> None:
+    """A capacity control that sheds ordinary concurrency would refuse valid work.
+
+    The harness cannot be configured above ``MAX_CONCURRENCY``, and every one of those requests may
+    land on a single replica when only one is addressed. If the per-replica cap were below that, a
+    heavy but legitimate tenant could be turned away — which is exactly what the fix must not do.
+    """
+    assert BOUNDS.max_in_flight_upstream >= MAX_CONCURRENCY

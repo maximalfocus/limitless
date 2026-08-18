@@ -140,6 +140,19 @@ class LedgerView(BaseModel):
     per_tenant: list[TenantLedgerEntry]
 
 
+class ProviderStatsView(BaseModel):
+    """How many lookups the provider had in flight, observed by the provider itself.
+
+    The application deliberately does not report its own occupancy: how full a service is right now
+    is the beginning of knowing exactly when to push. The provider fixture, on the other hand, is
+    free to say how busy it was, and its count is the honest one anyway — it is the service actually
+    doing the work.
+    """
+
+    in_flight: int
+    peak_in_flight: int
+
+
 class ProviderControlView(BaseModel):
     """The provider fixture's instrumentation state.
 

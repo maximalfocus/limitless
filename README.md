@@ -42,13 +42,33 @@ The application runs as **two replicas over one shared PostgreSQL instance**. Th
 mechanism, not a deployment choice: an allowance held inside one process silently becomes two
 allowances the moment a second process serves the same endpoint.
 
+## The harness
+
+A containerized **concurrent load and amplification harness** drives the demonstration. Every request
+in a round is released on a single barrier, so the application really does see them arrive together,
+and every round mixes three things at once: ordinary legitimate work, reads of an endpoint that needs
+no provider and no budget, and probes naming more than a bound allows.
+
+Each run ends in an accounting whose central number is the **amplification ratio** — fictional cents
+admitted per byte of input — beside the spend cap and its remaining balance, peak occupancy against
+capacity, cheap-endpoint availability, refusals by kind, and an explicit **bounded / unbounded**
+verdict. The money in it is read from the provider's own ledger, and the transcript is written to
+`artifacts/` as the run artifact behind every claim.
+
+Against the secure application the harness asserts, in **every** round and at one replica and at two:
+every tenant charged against its own allowance only, the global cap never breached, no bystander
+affected by another tenant's spending, in-flight work never over its cap, the cheap endpoint
+answering every request, and **zero** bound violations. Those exact assertions are also what prove
+the harness genuinely generates load — a harness that generated none would satisfy them without
+trying.
+
 ## Running it
 
 Requires **Docker** and nothing else — no PostgreSQL, no Python environment, no host tuning.
 
 ```sh
 bash scripts/demo.sh      # the sequential demonstration
-bash scripts/verify.sh    # the complete boundary: demo, audit gate, containment, ruff, mypy, tests
+bash scripts/verify.sh    # the complete boundary: demo, harness, audit gate, containment, tests
 ```
 
 A documented run parameter selects how many replicas are addressed:
@@ -61,8 +81,10 @@ LIMITLESS_REPLICAS=1 bash scripts/demo.sh
 
 - The network is `internal: true`. There is **no egress**, and no service publishes a port.
 - The demonstration's targets are its own in-network services and **cannot be redirected** at any
-  other host by configuration, argument, or environment. This is not, and must never become, a
-  general-purpose load or stress tool.
+  other host by configuration, argument, or environment. The harness takes no target argument at all.
+  This is not, and must never become, a general-purpose load or stress tool.
+- The harness's concurrency, round count, and the **amount of work a round may name** are all bounded
+  by explicit configured maxima.
 - Every service declares an explicit memory and CPU limit, so the whole resource envelope is bounded
   and legible on the host.
 - Containers run non-root with all capabilities dropped, `no-new-privileges`, and a read-only root

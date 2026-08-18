@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from enum import StrEnum
+from pathlib import Path
 from typing import Any, Final
 from urllib.parse import urlsplit
 
@@ -82,8 +84,22 @@ class SecureBounds:
     max_expansion_ratio: int = 25
     """The second expansion ceiling. A ratio bound catches what an absolute bound alone cannot."""
 
-    max_in_flight_upstream: int = 8
-    """Concurrent provider calls. Excess is shed immediately rather than queued without bound."""
+    max_in_flight_upstream: int = 48
+    """Concurrent provider calls per replica. Excess is shed immediately rather than queued.
+
+    Chosen to sit comfortably above ``MAX_CONCURRENCY``, so that the harness's highest configured
+    load — even when every request is aimed at a single replica — is served rather than shed. That
+    is a requirement rather than a courtesy: a heavy but legitimate tenant must be able to spend its
+    whole allowance without being refused, so a capacity control that turned ordinary concurrency
+    away would be protecting the budget by rejecting valid work.
+
+    This cap is **per process**, and deliberately so. Two replicas admit twice as much in-flight
+    work, because each one is protecting its own workers, memory, and connections — which is what a
+    concurrency limit is for. That is not the mistake a later part of this demonstration is about:
+    there, the thing held in process memory is the *budget*, and a budget enforced twice in parallel
+    is simply not the budget. Money is shared state and lives in the store; capacity is local and
+    lives in the process.
+    """
 
     upstream_deadline_seconds: float = 5.0
     """A deadline on each provider call that *cancels* the call rather than merely returning."""
@@ -101,6 +117,58 @@ class SecureBounds:
 
 BOUNDS: Final = SecureBounds()
 """The bounds the secure application runs with. One instance, so tests and docs cannot drift."""
+
+
+class ReproductionMode(StrEnum):
+    """How a run reproduces what it reports."""
+
+    NATURAL = "natural"
+    """No instrumentation whatsoever, in any code path, and no provider hold.
+
+    Genuine concurrent load, and figures that are **observed**. Against the secure application its
+    assertions are still exact — zero bound violations, zero cheap-endpoint failures, the global cap
+    never breached — because a secure-side violation is a real failure rather than a flake.
+    """
+
+
+def parse_reproduction_mode(raw: str | None) -> ReproductionMode | None:
+    """Parse a mode name. Returns the default for ``None``/empty and ``None`` for a bad value."""
+    if raw is None or raw == "":
+        return ReproductionMode.NATURAL
+    try:
+        return ReproductionMode(raw.strip().lower())
+    except ValueError:
+        return None
+
+
+DEFAULT_CONCURRENCY: Final = 24
+"""Concurrent requests per burst by default."""
+
+MAX_CONCURRENCY: Final = 32
+"""A hard ceiling on concurrency.
+
+The load exists only to exercise an unbounded code path, is aimed only at the demonstration's own
+services on a network with no egress, and is capped by explicit configuration. This is a containment
+bound, not a tuning knob: nothing here may grow into a general-purpose load tool.
+"""
+
+DEFAULT_ROUNDS: Final = 3
+MAX_ROUNDS: Final = 20
+"""A hard ceiling on how many times a burst may be repeated."""
+
+DEFAULT_BATCH_RECORDS: Final = 20
+"""Records named by one ordinary concurrent request. Each one is a metered lookup."""
+
+MAX_LOOKUPS_PER_ROUND: Final = 2_000
+"""A hard ceiling on the **work** one round may name, not merely on how many requests it sends.
+
+This is the same distinction the whole demonstration is about, turned on the demonstration itself.
+A bound on request count says nothing about how much work those requests name: nineteen requests can
+name five hundred lookups each and ask a single-CPU fixture for nine and a half thousand lookups at
+once. Bounding the work keeps the harness's own load modest and — just as importantly — keeps every
+required assertion independent of how fast the host happens to be. A run whose outcome depends on
+whether a deadline was reached is not a reproducible run.
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,3 +285,68 @@ def _target_list(
     """Parse a comma-separated target list, refusing any host that is not our own."""
     raw = source.get(name, ",".join(default))
     return tuple(require_allowed_target(url.strip()) for url in raw.split(",") if url.strip())
+
+
+def _bounded_int(source: dict[str, str] | Any, name: str, default: int, ceiling: int) -> int:
+    """Read a bounded run parameter, refusing anything outside its documented range."""
+    raw = source.get(name, str(default))
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer; got {raw!r}") from exc
+    if not 1 <= value <= ceiling:
+        raise ValueError(f"{name} must be between 1 and {ceiling}; got {value}")
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class HarnessConfig:
+    """Configuration for the concurrent load harness.
+
+    The concurrency level and the round count are demonstration parameters and explicit safety
+    bounds at the same time. The load is generated only to expose an unbounded code path, is aimed
+    only at the demonstration's own in-network services, and can never exceed the ceilings above.
+    """
+
+    runner: RunnerConfig
+    mode: ReproductionMode
+    concurrency: int
+    rounds: int
+    batch_records: int
+    transcript_path: Path
+
+    @property
+    def in_flight_capacity(self) -> int:
+        """The in-flight capacity the addressed replicas have between them.
+
+        Each replica bounds its own in-flight upstream work, so the capacity available to a run is
+        the per-replica cap times the number of replicas being addressed.
+        """
+        return BOUNDS.max_in_flight_upstream * len(self.runner.replica_urls)
+
+    @classmethod
+    def from_env(cls, env: dict[str, str] | None = None) -> HarnessConfig:
+        source = os.environ if env is None else env
+        mode = parse_reproduction_mode(source.get("LIMITLESS_MODE"))
+        if mode is None:
+            raise ValueError(
+                f"LIMITLESS_MODE must be one of {', '.join(m.value for m in ReproductionMode)}; "
+                f"got {source.get('LIMITLESS_MODE')!r}"
+            )
+        return cls(
+            runner=RunnerConfig.from_env(env),
+            mode=mode,
+            concurrency=_bounded_int(
+                source, "LIMITLESS_CONCURRENCY", DEFAULT_CONCURRENCY, MAX_CONCURRENCY
+            ),
+            rounds=_bounded_int(source, "LIMITLESS_ROUNDS", DEFAULT_ROUNDS, MAX_ROUNDS),
+            batch_records=_bounded_int(
+                source,
+                "LIMITLESS_BATCH_RECORDS",
+                DEFAULT_BATCH_RECORDS,
+                BOUNDS.max_batch_items,
+            ),
+            transcript_path=Path(
+                source.get("LIMITLESS_TRANSCRIPT_PATH", "/artifacts/harness-transcript.txt")
+            ),
+        )

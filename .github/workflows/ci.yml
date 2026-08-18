@@ -25,3 +25,12 @@ jobs:
       # Docker that is already there.
       - name: Verify
         run: bash scripts/verify.sh
+
+      # The harness transcript is the run artifact behind every accounting claim.
+      - name: Upload harness transcript
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: harness-transcript
+          path: artifacts/
+          if-no-files-found: warn

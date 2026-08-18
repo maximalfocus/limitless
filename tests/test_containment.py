@@ -70,12 +70,24 @@ def test_the_topology_is_two_replicas_over_one_database() -> None:
     assert sum(1 for name in names if name == "db") == 1
 
 
-def test_no_vulnerable_service_or_load_harness_exists_yet() -> None:
-    """This slice delivers the secure application and nothing else."""
-    assert not {"vuln-a", "vuln-b", "harness"} & set(services())
+def test_no_vulnerable_service_exists_yet() -> None:
+    """The harness exists now. A deliberately unbounded application still does not."""
+    assert not {"vuln-a", "vuln-b"} & set(services())
     modules = {path.parent.name for path in (ROOT / "src").rglob("*.py")}
     assert "vulnerable" not in modules
-    assert "harness" not in modules
+
+
+def test_the_harness_writes_only_to_the_artifacts_directory() -> None:
+    """Its root filesystem is read-only; the transcript goes to a bind mount and nowhere else."""
+    harness = services()["harness"]
+    assert harness["read_only"] is True
+    assert harness["volumes"] == ["./artifacts:/artifacts"]
+
+
+def test_the_harness_command_takes_no_target() -> None:
+    """There is no host, URL, or address argument to give it."""
+    command = services()["harness"]["command"]
+    assert command == ["python", "-m", "limitless.harness"]
 
 
 @pytest.mark.parametrize(

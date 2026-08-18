@@ -242,9 +242,21 @@ async def upsert_records(
     entries: list[tuple[str, str, str]],
     enriched_at: datetime,
 ) -> None:
-    """Store enriched records. ``entries`` is ``(record_id, company_name, registry_number)``."""
+    """Store enriched records. ``entries`` is ``(record_id, company_name, registry_number)``.
+
+    The rows are **deduplicated and sorted by ``record_id``** before they are written, and that is a
+    correctness requirement rather than tidiness. Two concurrent requests enriching overlapping sets
+    of companies take row locks on the same records; if each takes them in the order its own payload
+    happened to arrive in, the two can hold what the other needs and PostgreSQL breaks the tie by
+    killing one of them. Writing in a single agreed order means no two writers ever hold locks in
+    opposite orders, so the deadlock cannot form at all.
+
+    Deduplication matters for the same reason and saves the statement from conflicting with itself:
+    a batch may legitimately name the same company twice, and one row deserves one write.
+    """
     if not entries:
         return
+    latest = {record_id: (company_name, number) for record_id, company_name, number in entries}
     await conn.cursor().executemany(
         SQL_UPSERT_RECORD,
         [
@@ -255,6 +267,6 @@ async def upsert_records(
                 "registry_number": registry_number,
                 "enriched_at": enriched_at,
             }
-            for record_id, company_name, registry_number in entries
+            for record_id, (company_name, registry_number) in sorted(latest.items())
         ],
     )

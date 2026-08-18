@@ -22,7 +22,7 @@ import httpx
 
 from .auth import token_for
 from .config import require_allowed_target
-from .models import LedgerView
+from .models import LedgerView, ProviderStatsView
 
 REQUEST_ID_HEADER: Final = "X-Request-Id"
 REPLICA_HEADER: Final = "X-Limitless-Replica"
@@ -262,6 +262,14 @@ class HalyardHTTP:
         response = await self._client.get(f"{self._provider_url}/ledger")
         response.raise_for_status()
         return LedgerView.model_validate(response.json())
+
+    async def provider_stats(self) -> ProviderStatsView:
+        """How busy the provider fixture has been, observed and reported by the fixture itself."""
+        if self._provider_url is None:
+            raise RuntimeError("no provider URL was configured for this client")
+        response = await self._client.get(f"{self._provider_url}/stats")
+        response.raise_for_status()
+        return ProviderStatsView.model_validate(response.json())
 
     async def set_provider_control(
         self, *, slow_mode: bool | None = None, held: bool | None = None
