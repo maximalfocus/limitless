@@ -9,7 +9,8 @@ budgets, and the credentials. The demonstration runs on a hermetic container net
 egress**, publishes no ports, contacts no real service, and directs traffic at nothing but the
 services it starts itself.
 
-> This project is a work in progress. It is not deployed, not hosted, and not intended to be.
+> **Nothing here is deployed or hosted, and nothing here is intended to be.** It runs on your own
+> machine, in containers, or it does not run at all.
 
 ## The idea in one line
 
@@ -21,10 +22,13 @@ provider that bills for every one of them. The gap between what a request *costs
 what it *costs you* is the vulnerability, and the ratio between those two numbers is the number that
 matters.
 
-## What is here now
+## What is here
 
-The **secure** side of the demonstration: a fictional business-to-business enrichment API
-(*Halyard Insights*) that bounds all five dimensions a caller can otherwise drive without limit.
+Both sides of the demonstration, the harness that drives them, the repairs that fail, the controls
+that mark the boundary, and the comparison that puts every scenario in one table.
+
+Start with the **secure** side: a fictional business-to-business enrichment API (*Halyard Insights*)
+that bounds all five dimensions a caller can otherwise drive without limit.
 
 | Dimension | Bound |
 |---|---|
@@ -181,3 +185,23 @@ This demonstration is about an application admitting unbounded work through its 
 interface**. It is not about network- or transport-layer denial of service, and it makes no
 throughput, latency, or capacity claim of any kind. Concurrency exists here to expose an unbounded
 code path, never to measure a system.
+
+## Contributing
+
+[`CONTRIBUTING.md`](CONTRIBUTING.md) has the prerequisite (Docker), the one command that has to pass
+(`bash scripts/verify.sh`), and the hard constraints a change may not break.
+
+## Security
+
+This repository contains an intentionally vulnerable application **on purpose**, and that deliberate
+unbounded consumption is the subject of the project rather than a defect to report.
+[`SECURITY.md`](SECURITY.md) draws the line between it and an *unintended* weakness, and gives a
+private reporting path for the latter.
+
+## License
+
+[MIT](LICENSE).
+
+This project makes **no** service-level, support-duration, compatibility, or production-readiness
+promise. It is local educational material: not deployed, not hosted, and not published as a package
+or a container image. The vulnerable application must never be deployed anywhere.
